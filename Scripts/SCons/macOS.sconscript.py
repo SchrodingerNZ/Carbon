@@ -46,8 +46,12 @@ env['LINKFLAGS'] += flags + ['-Wl,-syslibroot,' + macOSSDKPath]
 # The SetupForLinkingCarbon() method sets up the environment for linking Carbon as a dynamic library or linking Carbon
 # as a static library into a final application
 def SetupForLinkingCarbon(self, **keywords):
-    defaultDependencies = ['AngelScript', 'Bullet', 'FreeImage', 'FreeType', 'OpenAssetImport', 'PhysX', 'Vorbis',
-                           'ZLib']
+
+    defaultDependencies = ['AngelScript', 'Bullet', 'FreeImage', 'FreeType', 'OpenAssetImport', 'Vorbis', 'ZLib']
+
+    if architecture == 'x64':
+        defaultDependencies.append('PhysX')
+        
     dependencies = keywords.get('dependencies', defaultDependencies)
 
     self['LIBPATH'] += GetDependencyLIBPATH(*dependencies)

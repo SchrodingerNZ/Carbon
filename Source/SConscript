@@ -75,8 +75,11 @@ if platform == 'Windows':
 
 elif platform == 'Linux' or platform == 'macOS':
 
-    dependencies = ['AngelScript', 'Bullet', 'FreeImage', 'FreeType', 'OpenAssetImport', 'PhysX', 'Vorbis', 'ZLib']
+    dependencies = ['AngelScript', 'Bullet', 'FreeImage', 'FreeType', 'OpenAssetImport', 'Vorbis', 'ZLib']
 
+    if platform == 'Linux' or architecture == 'x64':
+        dependencies += ['PhysX']
+        
     # Environment for Carbon
     engineEnv = baseEnv.Clone()
     engineEnv['CPPDEFINES'] += ['CARBON_EXPORTS'] + GetDependencyCPPDEFINES(*(dependencies + ['OpenAL', 'OpenGL11']))

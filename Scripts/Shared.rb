@@ -250,6 +250,21 @@ def merge_static_libraries(inputs, output, options = {})
   output
 end
 
+# For use on macOS and iOS, this method merges architecture-specific static libraries into a universal static library.
+def create_universal_static_library(inputs, output, options = {})
+  inputs = Array(inputs).select { |input| File.file? input }
+
+  FileUtils.mkpath File.dirname(output)
+
+  sdk = options.fetch :sdk, :macosx
+
+  command = "xcrun -sdk #{sdk} lipo -create -output #{output.quoted} #{inputs.map(&:quoted).join ' '}"
+
+  run command, { echo: false, error: 'Failed creating universal static library' }.merge(options)
+
+  output
+end
+
 # Copies the source file to the destination and ensures the destination path is created if needed.
 def cp(source, destination)
   FileUtils.mkpath File.dirname(destination)

@@ -43,8 +43,11 @@ class AppleSDKBuilder < SDKBuilderBase
   def build_targets
     [:macOS, :iOS, :iOSSimulator].each { |target_platform| build_dependencies target_platform: target_platform }
 
-    scons targets: [], arguments: scons_arguments
-    scons targets: :CarbonEngine, arguments: scons_arguments(type: :Debug)
+    scons targets: [], arguments: scons_arguments(platform: :macOS, type: :Release, architecture: :x64)
+    scons targets: :CarbonEngine, arguments: scons_arguments(platform: :macOS, type: :Debug, architecture: :x64)
+
+    scons targets: [], arguments: scons_arguments(platform: :macOS, type: :Release, architecture: :ARM64)
+    scons targets: :CarbonEngine, arguments: scons_arguments(platform: :macOS, type: :Debug, architecture: :ARM64)
 
     scons targets: :CarbonEngine, arguments: scons_arguments(platform: :iOS, type: :Debug, architecture: :ARM64)
     scons targets: :CarbonEngine, arguments: scons_arguments(platform: :iOS, type: :Release, architecture: :ARM64)
@@ -80,9 +83,16 @@ class AppleSDKBuilder < SDKBuilderBase
   end
 
   def create_static_library_for_macos(build_type)
-    inputs = [engine_library(:macOS, :x64, build_type), *dependency_libraries(:macOS, :x64)]
+    architecture_libraries = [:x64, :ARM64].map do |architecture|
+      output = "#{BUILD_LOCATION}/macOS/#{architecture}/#{engine_library_name build_type}"
 
-    merge_static_libraries inputs, "#{@package_root}/Library/#{engine_library_name build_type}"
+      inputs = [engine_library(:macOS, architecture, build_type), *dependency_libraries(:macOS, architecture)]
+      merge_static_libraries inputs, output
+
+      output
+    end
+
+    create_universal_static_library architecture_libraries, "#{@package_root}/Library/#{engine_library_name build_type}"
   end
 
   def create_static_library_for_ios(build_type)
