@@ -24,6 +24,9 @@ if platform == 'iOS' and architecture == 'x86' and isReleaseBuild:
     sources.remove(env.fs.File('as_callfunc_x86.cpp'))
     sources += env.StaticObject(source='as_callfunc_x86.cpp', CCFLAGS=newCCFLAGS)
 
+if platform in ['macOS', 'iOSSimulator'] and architecture == 'x64':
+    env.Append(CPPDEFINES=['AS_MAX_PORTABILITY'])
+
 result = env.StaticLibrary(target=target, source=sources)
 
 Return('result')
