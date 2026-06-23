@@ -37,6 +37,15 @@ if isStrictBuild:
                        '-Wno-implicit-fallthrough', '-Wno-keyword-macro', '-Wno-missing-noreturn',
                        '-Wno-missing-prototypes', '-Wno-nullable-to-nonnull-conversion', '-Wno-over-aligned',
                        '-Wno-padded', '-Wno-sign-conversion', '-Wno-switch-enum', '-Wno-unused-template',
+                       '-Wno-deprecated-declarations',
+                       '-Wno-enum-enum-conversion',
+                       '-Wno-implicit-int-float-conversion',
+                       '-Wno-cast-function-type-strict',
+                       '-Wno-nrvo',
+                       '-Wno-extra-semi-stmt',
+                       '-Wno-switch-default',
+                       '-Wno-cast-qual',
+                       '-Wno-unique-object-duplication',
                        '-Wno-weak-vtables']
 
 
