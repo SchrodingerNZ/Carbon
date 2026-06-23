@@ -33,6 +33,35 @@ const auto MouseBufferSize = 256U;
 
 const auto PrimaryDisplayDevice = String("\\\\.\\DISPLAY1");
 
+
+void setProcessDPIAwareness()
+{
+    auto user32 = LoadLibraryW(L"user32.dll");
+    if (!user32)
+        return;
+
+    using SetProcessDpiAwarenessContextFunction = BOOL(WINAPI*)(HANDLE);
+    auto setProcessDpiAwarenessContext =
+        reinterpret_cast<SetProcessDpiAwarenessContextFunction>(GetProcAddress(user32, "SetProcessDpiAwarenessContext"));
+
+    if (setProcessDpiAwarenessContext)
+    {
+        if (setProcessDpiAwarenessContext(reinterpret_cast<HANDLE>(-4)))
+        {
+            FreeLibrary(user32);
+            return;
+        }
+    }
+
+    using SetProcessDPIAwareFunction = BOOL(WINAPI*)();
+    auto setProcessDPIAware = reinterpret_cast<SetProcessDPIAwareFunction>(GetProcAddress(user32, "SetProcessDPIAware"));
+
+    if (setProcessDPIAware)
+        setProcessDPIAware();
+
+    FreeLibrary(user32);
+}
+
 PlatformWindows::PlatformWindows()
 {
     events().addHandler<UpdateEvent>(this, true);
@@ -160,6 +189,8 @@ PlatformWindows::~PlatformWindows()
 
 bool PlatformWindows::setup()
 {
+    setProcessDPIAwareness();
+
     PlatformInterface::setup();
 
     // Enumerate supported resolutions
