@@ -131,7 +131,7 @@ class DependencyBuilder
 
   def build_macos_dependencies
     dependencies.each do |dependency|
-      build dependency
+      build dependency, arguments: { architecture: :ARM64 }
     end
   end
 

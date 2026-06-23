@@ -10,6 +10,19 @@ Import('*')
 
 env = SConscript('Compilers/Clang.sconscript.py')
 
+
+vars = Variables()
+vars.AddVariables(
+    ('architecture', 'Sets the target build architecture, must be ARM64 or x64.')
+)
+Help(vars.GenerateHelpText(Environment()))
+
+architecture = ARGUMENTS.get('architecture', 'ARM64')
+if architecture not in ['ARM64', 'x64']:
+    print('Error: invalid build architecture')
+    Exit(1)
+
+
 # Find the latest macOS SDK
 macOSSDKPath = '/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk'
 if not os.path.isdir(macOSSDKPath):
@@ -23,7 +36,9 @@ if not os.path.isdir(macOSSDKPath):
         Exit(1)
 
 # Setup environment for the selected SDK
-flags = ['-arch', 'x86_64', '-mmacosx-version-min=10.14', '-isysroot', macOSSDKPath]
+flags = ['-arch', {'x64': 'x86_64', 'ARM64': 'arm64'}[architecture],
+         '-mmacosx-version-min=11.0', '-isysroot', macOSSDKPath]
+
 env['CCFLAGS'] += flags + ['-fobjc-arc']
 env['LINKFLAGS'] += flags + ['-Wl,-syslibroot,' + macOSSDKPath]
 
@@ -51,7 +66,7 @@ def Carbonize(self, **keywords):
 
     if 'carbonroot' in ARGUMENTS:
         self['CPPPATH'] += [os.path.join(ARGUMENTS['carbonroot'], 'Source')]
-        self['LIBPATH'] += [os.path.join(ARGUMENTS['carbonroot'], 'Build', 'macOS', 'x64', 'Clang', buildType)]
+        self['LIBPATH'] += [os.path.join(ARGUMENTS['carbonroot'], 'Build', 'macOS', architecture, 'Clang', buildType)]
 
         if self.IsCarbonEngineStatic():
             self.SetupForLinkingCarbon()
@@ -68,5 +83,6 @@ def Carbonize(self, **keywords):
 env.AddMethod(Carbonize)
 
 # Return the build details
-details = {'platform': 'macOS', 'architecture': 'x64', 'compiler': 'Clang', 'env': env}
+details = {'platform': 'macOS', 'architecture': architecture, 'compiler': 'Clang', 'env': env}
+
 Return('details')
