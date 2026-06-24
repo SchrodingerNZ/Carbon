@@ -62,9 +62,13 @@
 
                 <!-- Add search paths so the CarbonEngine headers and libraries can be found -->
                 <key>HEADER_SEARCH_PATHS</key>
-                <string>/Applications/Carbon\ SDK/Include</string>
+                <array>
+                    <string>/Applications/Carbon\ SDK/Include</string>
+                </array>
                 <key>LIBRARY_SEARCH_PATHS</key>
-                <string>/Applications/Carbon\ SDK/Library</string>
+                <array>
+                    <string>/Applications/Carbon\ SDK/Library</string>
+                </array>
             </dict>
 
             <key>Frameworks</key>
@@ -142,9 +146,13 @@
 
                 <!-- Add search paths so the CarbonEngine headers and libraries can be found -->
                 <key>HEADER_SEARCH_PATHS</key>
-                <string>/Applications/Carbon\ SDK/Include</string>
+                <array>
+                    <string>/Applications/Carbon\ SDK/Include</string>
+                </array>
                 <key>LIBRARY_SEARCH_PATHS</key>
-                <string>/Applications/Carbon\ SDK/Library</string>
+                <array>
+                    <string>/Applications/Carbon\ SDK/Library</string>
+                </array>
             </dict>
 
             <key>Frameworks</key>
