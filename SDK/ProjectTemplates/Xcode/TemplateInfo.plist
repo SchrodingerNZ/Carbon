@@ -65,10 +65,6 @@
                 <array>
                     <string>/Applications/Carbon\ SDK/Include</string>
                 </array>
-                <key>LIBRARY_SEARCH_PATHS</key>
-                <array>
-                    <string>/Applications/Carbon\ SDK/Library</string>
-                </array>
             </dict>
 
             <key>Frameworks</key>
@@ -85,13 +81,13 @@
                 <key>Debug</key>
                 <dict>
                     <key>OTHER_LDFLAGS</key>
-                    <string>-lCarbonEngineDebug</string>
+                    <string>/Applications/Carbon\ SDK/Library/libCarbonEngineDebug.a</string>
                 </dict>
 
                 <key>Release</key>
                 <dict>
                     <key>OTHER_LDFLAGS</key>
-                    <string>-lCarbonEngine</string>
+                    <string>/Applications/Carbon\ SDK/Library/libCarbonEngine.a</string>
                 </dict>
             </dict>
 
@@ -149,10 +145,6 @@
                 <array>
                     <string>/Applications/Carbon\ SDK/Include</string>
                 </array>
-                <key>LIBRARY_SEARCH_PATHS</key>
-                <array>
-                    <string>/Applications/Carbon\ SDK/Library</string>
-                </array>
             </dict>
 
             <key>Frameworks</key>
@@ -172,9 +164,9 @@
                 <key>Debug</key>
                 <dict>
                     <key>OTHER_LDFLAGS[sdk=iphoneos*]</key>
-                    <string>-lCarbonEngineiOSDebug</string>
+                    <string>/Applications/Carbon\ SDK/Library/libCarbonEngineiOSDebug.a</string>
                     <key>OTHER_LDFLAGS[sdk=iphonesimulator*]</key>
-                    <string>-lCarbonEngineiOSSimulatorDebug</string>
+                    <string>/Applications/Carbon\ SDK/Library/libCarbonEngineiOSSimulatorDebug.a</string>
                 </dict>
 
                 <key>Release</key>
@@ -182,9 +174,9 @@
                     <key>VALIDATE_PRODUCT</key>
                     <string>YES</string>
                     <key>OTHER_LDFLAGS[sdk=iphoneos*]</key>
-                    <string>-lCarbonEngineiOS</string>
+                    <string>/Applications/Carbon\ SDK/Library/libCarbonEngineiOS.a</string>
                     <key>OTHER_LDFLAGS[sdk=iphonesimulator*]</key>
-                    <string>-lCarbonEngineiOSSimulator</string>
+                    <string>/Applications/Carbon\ SDK/Library/libCarbonEngineiOSSimulator.a</string>
                 </dict>
             </dict>
 
