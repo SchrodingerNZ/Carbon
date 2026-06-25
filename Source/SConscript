@@ -20,6 +20,12 @@ if platform == 'Windows':
     engineEnv['CPPDEFINES'] += ['CARBON_EXPORTS', 'CARBON_INCLUDE_PLATFORM_WINDOWS']
     engineEnv['CPPDEFINES'] += GetDependencyCPPDEFINES(*(dependencies + ['OpenAL', 'OpenGL11']))
     engineEnv['CPPPATH'] += ['#/Source'] + GetDependencyCPPPATH(*(dependencies + ['OpenALSoft']))
+    engineEnv['LIBPATH'] += GetDependencyLIBPATH(*dependencies)
+    engineEnv['LIBS'] += [
+        dependency + compiler + ('Debug' if isDebugBuild else '')
+        for dependency in dependencies
+        if dependency != 'PhysX'
+    ]
 
     # Environments for the Max exporters
     maxVersions = []
