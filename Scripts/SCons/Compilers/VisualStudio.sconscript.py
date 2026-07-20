@@ -7,8 +7,10 @@
 
 Import('*')
 
-env = Environment(MSVC_VERSION={'VisualStudio2022': '14.3'}[compiler],
-                  TARGET_ARCH={'x86': 'x86', 'x64': 'x86_64'}[architecture])
+env = Environment(MSVC_VERSION={
+    'VisualStudio2022': '14.3',
+    'VisualStudio2026': '14.5',
+}[compiler], TARGET_ARCH={'x86': 'x86', 'x64': 'x86_64'}[architecture])
 
 env['ARFLAGS'] = ['/MACHINE:' + architecture]
 env['CCFLAGS'] = ['/EHsc', '/fp:fast', '/nologo']
