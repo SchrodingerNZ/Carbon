@@ -125,13 +125,7 @@ Section "Development Files" SectionDevelopmentFiles
 
     # Project templates
     SetOutPath "$INSTDIR\ProjectTemplate"
-    File /r "SDK\ProjectTemplates\VisualStudio\CarbonApplication.ico"
-    File /r "SDK\ProjectTemplates\VisualStudio\CarbonApplication.vsdir"
-    File /r "SDK\ProjectTemplates\VisualStudio\CarbonApplication.vsz"
-    File /r "SDK\ProjectTemplates\VisualStudio\*.cpp"
-    File /r "SDK\ProjectTemplates\VisualStudio\*.h"
-    File /r "SDK\ProjectTemplates\VisualStudio\*.inf"
-    File /r "SDK\ProjectTemplates\VisualStudio\*.js"
+    File "SDK\Windows\CarbonApplication.zip"
 
     # Install project templates
     ExecWait "$INSTDIR\Bin\WindowsSDKAssistant.exe /projecttemplates"

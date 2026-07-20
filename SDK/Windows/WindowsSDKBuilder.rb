@@ -17,7 +17,7 @@ class WindowsSDKBuilder < SDKBuilderBase
 
   def create_sdk
     build_targets
-    create_visual_studio_project_template
+    create_visual_studio_project_template_archive
     create_sample_application_visual_studio_project_files
     create_sdk_installer
   end
@@ -25,6 +25,7 @@ class WindowsSDKBuilder < SDKBuilderBase
   def cleanup
     super
 
+    delete_visual_studio_project_template_archive
     delete_sample_application_visual_studio_project_files
     restore_working_directory
     remove_subst_drive
@@ -67,9 +68,22 @@ class WindowsSDKBuilder < SDKBuilderBase
     scons_x64 targets: :CarbonEngine, arguments: scons_arguments(type: :Debug)
   end
 
-  def create_visual_studio_project_template
-    create_template_files class_name: '[!output SAFE_PROJECT_NAME]', header_name: '[!output PROJECT_NAME].h',
-                          target_without_extension: 'SDK/ProjectTemplates/VisualStudio/Templates/1033/Application'
+  def create_visual_studio_project_template_archive
+    @visual_studio_project_template_archive = 'SDK/Windows/CarbonApplication.zip'
+
+    FileUtils.rm_f @visual_studio_project_template_archive
+
+    run(
+      "powershell -NoProfile -Command \"Compress-Archive " \
+      "-Path 'SDK/ProjectTemplates/VisualStudio2026/*' " \
+      "-DestinationPath '#{@visual_studio_project_template_archive}' " \
+      '-Force"',
+      error: 'Failed creating Visual Studio project template archive'
+    )
+  end
+
+  def delete_visual_studio_project_template_archive
+    FileUtils.rm_f @visual_studio_project_template_archive if @visual_studio_project_template_archive
   end
 
   # Creates the Visual Studio project files for the sample applications. This is done by taking the XML project files

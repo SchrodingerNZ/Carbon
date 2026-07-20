@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<VSTemplate Version="3.0.0"
+            Type="Project"
+            xmlns="http://schemas.microsoft.com/developer/vstemplate/2005">
+  <TemplateData>
+    <Name>Carbon Application</Name>
+    <TemplateID>Carbon.Application</TemplateID>
+    <Description>Creates a Windows application using the Carbon engine.</Description>
+    <ProjectType>VC</ProjectType>
+    <LanguageTag>C++</LanguageTag>
+    <PlatformTag>Windows</PlatformTag>
+    <ProjectTypeTag>Desktop</ProjectTypeTag>
+    <DefaultName>CarbonApplication</DefaultName>
+    <SortOrder>1000</SortOrder>
+    <CreateNewFolder>true</CreateNewFolder>
+    <ProvideDefaultName>true</ProvideDefaultName>
+    <Icon>CarbonApplication.ico</Icon>
+  </TemplateData>
+
+  <TemplateContent>
+    <Project File="CarbonApplication.vcxproj"
+             TargetFileName="$projectname$.vcxproj"
+             ReplaceParameters="true">
+      <ProjectItem ReplaceParameters="true"
+                   TargetFileName="$projectname$.vcxproj.filters">
+        CarbonApplication.vcxproj.filters
+      </ProjectItem>
+      <ProjectItem ReplaceParameters="true"
+                   OpenInEditor="true"
+                   TargetFileName="$projectname$.cpp">
+        Application.cpp
+      </ProjectItem>
+      <ProjectItem ReplaceParameters="true"
+                   TargetFileName="$projectname$.h">
+        Application.h
+      </ProjectItem>
+    </Project>
+  </TemplateContent>
+</VSTemplate>
