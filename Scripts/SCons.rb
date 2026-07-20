@@ -46,7 +46,7 @@ module SCons
       iOSSimulator: { architecture: :ARM64,             compiler: :Clang },
       Linux:        { architecture: linux_architecture, compiler: :GCC },
       macOS:        { architecture: :x64,               compiler: :Clang },
-      Windows:      { architecture: :x86,               compiler: :VisualStudio2022 }
+      Windows:      { architecture: :x86,               compiler: :VisualStudio2026 }
     }.fetch(platform).merge(
       platform: platform, type: :Release, strict: false
     )

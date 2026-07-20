@@ -19,11 +19,13 @@
     #endif
     #ifdef _MSC_VER
 
-	#if _MSC_VER < 1930
-	    #error This version of Visual Studio is not supported, please upgrade
-	#else
-	    #define CARBON_MSVC_VERSION "2022"
-	#endif
+        #if _MSC_VER < 1930
+            #error This version of Visual Studio is not supported, please upgrade
+        #elif _MSC_VER < 1950
+            #define CARBON_MSVC_VERSION "2022"
+        #else
+            #define CARBON_MSVC_VERSION "2026"
+        #endif
 
         // The CARBON_STATIC_LIBRARY_DEPENDENCY_SUFFIX macro is used to automatically select the correct static library
         // file for a dependency such as FreeImage, it is aware of debug and release variants as well as the MSVC
