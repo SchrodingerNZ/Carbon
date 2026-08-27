@@ -25,13 +25,11 @@ extern Application* iOSCreateApplication();
 
 }
 
-@class CarboniOSSceneDelegate;
-
 // Define the application delegate to use
 @interface CarboniOSApplicationDelegate : NSObject <UIApplicationDelegate>
 @property (atomic) Carbon::Application* application;
 @property (atomic) NSTimer* animationTimer;
-- (void)initializeApplicationForWindowScene:(UIWindowScene*)windowScene;
+- (void)initializeApplication;
 - (void)startAnimation;
 - (void)stopAnimation;
 @end
@@ -44,14 +42,19 @@ extern Application* iOSCreateApplication();
 {
     self.animationTimer = nil;
 
-    // Preserve the legacy application lifecycle for clients that have not yet opted into UIScene in their Info.plist.
-    if (![[NSBundle mainBundle] objectForInfoDictionaryKey:@"UIApplicationSceneManifest"])
-        [self initializeApplicationForWindowScene:nil];
+    // Preserve the legacy application lifecycle on iOS 12 and for clients that have not opted into UIScene.
+    if (@available(ios 13.0, *))
+    {
+        if (![[NSBundle mainBundle] objectForInfoDictionaryKey:@"UIApplicationSceneManifest"])
+            [self initializeApplication];
+    }
+    else
+        [self initializeApplication];
 
     return YES;
 }
 
-- (void)initializeApplicationForWindowScene:(UIWindowScene*)windowScene
+- (void)initializeApplication
 {
     if (self.application)
         return;
@@ -62,8 +65,6 @@ extern Application* iOSCreateApplication();
         exit(0);
     }
 
-    static_cast<Carbon::PlatformiOS&>(Carbon::platform()).setWindowScene(windowScene);
-
     self.application = Carbon::iOSCreateApplication();
     if (!self.application->run(false))
     {
@@ -72,16 +73,6 @@ extern Application* iOSCreateApplication();
         delete self.application;
         self.application = nullptr;
     }
-}
-
-- (UISceneConfiguration*)application:(UIApplication*)application
-    configurationForConnectingSceneSession:(UISceneSession*)connectingSceneSession
-                                    options:(UISceneConnectionOptions*)options
-{
-    auto configuration = [[UISceneConfiguration alloc] initWithName:@"Carbon Default Configuration"
-                                                         sessionRole:connectingSceneSession.role];
-    configuration.delegateClass = [CarboniOSSceneDelegate class];
-    return configuration;
 }
 
 - (void)startAnimation
@@ -135,6 +126,8 @@ extern Application* iOSCreateApplication();
 @end
 
 // Scene delegate used by the modern UIKit scene lifecycle. Carbon supports a single rendering scene.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunguarded-availability-new"
 @interface CarboniOSSceneDelegate : UIResponder <UIWindowSceneDelegate>
 @end
 
@@ -142,7 +135,7 @@ extern Application* iOSCreateApplication();
 
 - (CarboniOSApplicationDelegate*)applicationDelegate
 {
-    return (CarboniOSApplicationDelegate*)UIApplication.sharedApplication.delegate;
+    return static_cast<CarboniOSApplicationDelegate*>(UIApplication.sharedApplication.delegate);
 }
 
 - (void)scene:(UIScene*)scene
@@ -152,7 +145,10 @@ extern Application* iOSCreateApplication();
     if (![scene isKindOfClass:[UIWindowScene class]])
         return;
 
-    [[self applicationDelegate] initializeApplicationForWindowScene:(UIWindowScene*)scene];
+    auto windowScene = static_cast<UIWindowScene*>(scene);
+    auto window = [[UIWindow alloc] initWithWindowScene:windowScene];
+    static_cast<Carbon::PlatformiOS&>(Carbon::platform()).setWindow(window);
+    [[self applicationDelegate] initializeApplication];
 }
 
 - (void)sceneDidBecomeActive:(UIScene*)scene
@@ -182,6 +178,7 @@ extern Application* iOSCreateApplication();
 }
 
 @end
+#pragma clang diagnostic pop
 
 int main(int argc, char* argv[])
 {
