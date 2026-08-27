@@ -166,15 +166,22 @@ bool PlatformiOS::setup()
         return false;
     }
 
-    // Create and setup a main window
-    window_ = [[UIWindow alloc] initWithFrame:[[UIScreen mainScreen] bounds]];
+    // Create and setup the main window. UIScene clients attach it to their UIWindowScene; legacy clients retain the
+    // previous UIScreen-based path until their Info.plist opts into the scene lifecycle.
+    if (windowScene_)
+    {
+        window_ = [[UIWindow alloc] initWithWindowScene:windowScene_];
+        window_.frame = windowScene_.coordinateSpace.bounds;
+    }
+    else
+        window_ = [[UIWindow alloc] initWithFrame:[[UIScreen mainScreen] bounds]];
     [window_ setRootViewController:[[CustomViewController alloc] initWithNibName:nullptr bundle:nullptr]];
     [window_ setUserInteractionEnabled:YES];
     [window_ setMultipleTouchEnabled:YES];
     [window_ makeKeyAndVisible];
 
     // Create an EAGL view and add it to the main window
-    view_ = [[EAGLView alloc] initWithFrame:window_.frame];
+    view_ = [[EAGLView alloc] initWithFrame:window_.bounds];
     window_.rootViewController.view = view_;
 
     // Setup the EAGL layer for the new view
@@ -207,7 +214,7 @@ bool PlatformiOS::setup()
     resolutions_.emplace(int(view_.frame.size.width), int(view_.frame.size.height));
     nativeResolution_ = resolutions_.back();
 
-    const auto scale = [UIScreen mainScreen].scale;
+    const auto scale = windowScene_ ? windowScene_.screen.scale : [UIScreen mainScreen].scale;
     LOG_INFO << "iOS main screen content scale: " << scale;
 
     // Retina resolution support
@@ -238,6 +245,7 @@ PlatformiOS::~PlatformiOS()
     context_ = nil;
     view_ = nil;
     window_ = nil;
+    windowScene_ = nil;
 }
 
 uintptr_t PlatformiOS::getPlatformSpecificValue(PlatformSpecificValue value) const
@@ -261,12 +269,13 @@ bool PlatformiOS::createWindow(const Resolution& resolution, WindowMode windowMo
     // If a retina resolution was requested but they are disabled then fall back to the equivalent non-retina resolution
     if (newResolution.isRetinaResolution() && !areRetinaResolutionsEnabled())
     {
-        const auto scale = uint([UIScreen mainScreen].scale);
+        const auto scale = uint(windowScene_ ? windowScene_.screen.scale : [UIScreen mainScreen].scale);
         newResolution = findResolution(newResolution.getWidth() / scale, newResolution.getHeight() / scale);
     }
 
     // Use retina display if requested
-    view_.contentScaleFactor = CGFloat(newResolution.isRetinaResolution() ? [UIScreen mainScreen].nativeScale : 1);
+    auto nativeScale = windowScene_ ? windowScene_.screen.nativeScale : [UIScreen mainScreen].nativeScale;
+    view_.contentScaleFactor = CGFloat(newResolution.isRetinaResolution() ? nativeScale : 1);
     view_.layer.contentsScale = view_.contentScaleFactor;
 
     // Create and bind a framebuffer

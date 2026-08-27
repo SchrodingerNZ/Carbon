@@ -25,10 +25,15 @@ extern Application* iOSCreateApplication();
 
 }
 
+@class CarboniOSSceneDelegate;
+
 // Define the application delegate to use
 @interface CarboniOSApplicationDelegate : NSObject <UIApplicationDelegate>
 @property (atomic) Carbon::Application* application;
 @property (atomic) NSTimer* animationTimer;
+- (void)initializeApplicationForWindowScene:(UIWindowScene*)windowScene;
+- (void)startAnimation;
+- (void)stopAnimation;
 @end
 
 @implementation CarboniOSApplicationDelegate
@@ -37,14 +42,28 @@ extern Application* iOSCreateApplication();
 
 - (BOOL)application:(UIApplication*)application didFinishLaunchingWithOptions:(NSDictionary*)launchOptions
 {
-    // Initialize the engine
+    self.animationTimer = nil;
+
+    // Preserve the legacy application lifecycle for clients that have not yet opted into UIScene in their Info.plist.
+    if (![[NSBundle mainBundle] objectForInfoDictionaryKey:@"UIApplicationSceneManifest"])
+        [self initializeApplicationForWindowScene:nil];
+
+    return YES;
+}
+
+- (void)initializeApplicationForWindowScene:(UIWindowScene*)windowScene
+{
+    if (self.application)
+        return;
+
     if (!Carbon::Globals::initializeEngine(Carbon::iOSGetApplicationName()))
     {
         LOG_ERROR << "Failed initializing the engine";
         exit(0);
     }
 
-    // Initialize the application
+    static_cast<Carbon::PlatformiOS&>(Carbon::platform()).setWindowScene(windowScene);
+
     self.application = Carbon::iOSCreateApplication();
     if (!self.application->run(false))
     {
@@ -53,22 +72,22 @@ extern Application* iOSCreateApplication();
         delete self.application;
         self.application = nullptr;
     }
-
-    self.animationTimer = nil;
-
-    return YES;
 }
 
-- (void)applicationDidBecomeActive:(UIApplication*)application
+- (UISceneConfiguration*)application:(UIApplication*)application
+    configurationForConnectingSceneSession:(UISceneSession*)connectingSceneSession
+                                    options:(UISceneConnectionOptions*)options
 {
-    LOG_INFO << "iOS application became active";
-    Carbon::events().dispatchEvent(Carbon::ApplicationGainFocusEvent());
+    auto configuration = [[UISceneConfiguration alloc] initWithName:@"Carbon Default Configuration"
+                                                         sessionRole:connectingSceneSession.role];
+    configuration.delegateClass = [CarboniOSSceneDelegate class];
+    return configuration;
+}
 
+- (void)startAnimation
+{
     if (self.animationTimer)
-    {
         [self.animationTimer invalidate];
-        self.animationTimer = nil;
-    }
 
     self.animationTimer = [NSTimer scheduledTimerWithTimeInterval:1.0 / 240.0
                                                            target:self
@@ -77,25 +96,10 @@ extern Application* iOSCreateApplication();
                                                           repeats:YES];
 }
 
-- (void)applicationWillResignActive:(UIApplication*)application
+- (void)stopAnimation
 {
-    LOG_INFO << "iOS application will resign active";
-    Carbon::events().dispatchEvent(Carbon::ApplicationLoseFocusEvent());
-
     [self.animationTimer invalidate];
     self.animationTimer = nil;
-}
-
-- (void)applicationDidEnterBackground:(UIApplication*)application
-{
-    LOG_INFO << "iOS application entered the background";
-    Carbon::events().dispatchEvent(Carbon::ApplicationLoseFocusEvent(true));
-}
-
-- (void)applicationWillEnterForeground:(UIApplication*)application
-{
-    LOG_INFO << "iOS application will enter the foreground";
-    Carbon::events().dispatchEvent(Carbon::ApplicationGainFocusEvent(true));
 }
 
 - (void)tick
@@ -113,8 +117,7 @@ extern Application* iOSCreateApplication();
 {
     LOG_INFO << "iOS application will terminate";
 
-    [self.animationTimer invalidate];
-    self.animationTimer = nil;
+    [self stopAnimation];
 
     // Shut down the application
     if (self.application)
@@ -129,6 +132,55 @@ extern Application* iOSCreateApplication();
     LOG_INFO << "iOS low memory warning received";
     Carbon::events().dispatchEvent(Carbon::LowMemoryWarningEvent());
 }
+@end
+
+// Scene delegate used by the modern UIKit scene lifecycle. Carbon supports a single rendering scene.
+@interface CarboniOSSceneDelegate : UIResponder <UIWindowSceneDelegate>
+@end
+
+@implementation CarboniOSSceneDelegate
+
+- (CarboniOSApplicationDelegate*)applicationDelegate
+{
+    return (CarboniOSApplicationDelegate*)UIApplication.sharedApplication.delegate;
+}
+
+- (void)scene:(UIScene*)scene
+    willConnectToSession:(UISceneSession*)session
+                options:(UISceneConnectionOptions*)connectionOptions
+{
+    if (![scene isKindOfClass:[UIWindowScene class]])
+        return;
+
+    [[self applicationDelegate] initializeApplicationForWindowScene:(UIWindowScene*)scene];
+}
+
+- (void)sceneDidBecomeActive:(UIScene*)scene
+{
+    LOG_INFO << "iOS scene became active";
+    Carbon::events().dispatchEvent(Carbon::ApplicationGainFocusEvent());
+    [[self applicationDelegate] startAnimation];
+}
+
+- (void)sceneWillResignActive:(UIScene*)scene
+{
+    LOG_INFO << "iOS scene will resign active";
+    Carbon::events().dispatchEvent(Carbon::ApplicationLoseFocusEvent());
+    [[self applicationDelegate] stopAnimation];
+}
+
+- (void)sceneDidEnterBackground:(UIScene*)scene
+{
+    LOG_INFO << "iOS scene entered the background";
+    Carbon::events().dispatchEvent(Carbon::ApplicationLoseFocusEvent(true));
+}
+
+- (void)sceneWillEnterForeground:(UIScene*)scene
+{
+    LOG_INFO << "iOS scene will enter the foreground";
+    Carbon::events().dispatchEvent(Carbon::ApplicationGainFocusEvent(true));
+}
+
 @end
 
 int main(int argc, char* argv[])

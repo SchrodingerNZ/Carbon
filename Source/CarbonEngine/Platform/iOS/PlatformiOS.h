@@ -57,8 +57,11 @@ public:
     void onTouchesMoved(NSSet<UITouch*>* touches, UIEvent* event);
     void onGestureRecognized(UIGestureRecognizer* gesture);
 
+    void setWindowScene(UIWindowScene* windowScene) { windowScene_ = windowScene; }
+
 private:
 
+    UIWindowScene* windowScene_ = nil;
     UIWindow* window_ = nil;
     UIView* view_ = nil;
     EAGLContext* context_ = nil;
