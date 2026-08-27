@@ -85,6 +85,11 @@
     return YES;
 }
 
+- (BOOL)prefersInterfaceOrientationLocked
+{
+    return YES;
+}
+
 - (BOOL)prefersStatusBarHidden
 {
     return YES;
