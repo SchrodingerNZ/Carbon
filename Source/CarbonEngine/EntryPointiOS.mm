@@ -29,7 +29,7 @@ extern Application* iOSCreateApplication();
 @interface CarboniOSApplicationDelegate : NSObject <UIApplicationDelegate>
 @property (atomic) Carbon::Application* application;
 @property (atomic) NSTimer* animationTimer;
-- (void)initializeApplication;
+- (void)initializeApplicationWithWindow:(UIWindow*)window;
 - (void)startAnimation;
 - (void)stopAnimation;
 @end
@@ -46,15 +46,15 @@ extern Application* iOSCreateApplication();
     if (@available(ios 13.0, *))
     {
         if (![[NSBundle mainBundle] objectForInfoDictionaryKey:@"UIApplicationSceneManifest"])
-            [self initializeApplication];
+            [self initializeApplicationWithWindow:nil];
     }
     else
-        [self initializeApplication];
+        [self initializeApplicationWithWindow:nil];
 
     return YES;
 }
 
-- (void)initializeApplication
+- (void)initializeApplicationWithWindow:(UIWindow*)window
 {
     if (self.application)
         return;
@@ -64,6 +64,11 @@ extern Application* iOSCreateApplication();
         LOG_ERROR << "Failed initializing the engine";
         exit(0);
     }
+
+    // Engine initialization creates the platform interface. Supply the scene-attached window before the
+    // application runs so PlatformiOS::setup() can use it.
+    if (window)
+        static_cast<Carbon::PlatformiOS&>(Carbon::platform()).setWindow(window);
 
     self.application = Carbon::iOSCreateApplication();
     if (!self.application->run(false))
@@ -147,8 +152,7 @@ extern Application* iOSCreateApplication();
 
     auto windowScene = static_cast<UIWindowScene*>(scene);
     auto window = [[UIWindow alloc] initWithWindowScene:windowScene];
-    static_cast<Carbon::PlatformiOS&>(Carbon::platform()).setWindow(window);
-    [[self applicationDelegate] initializeApplication];
+    [[self applicationDelegate] initializeApplicationWithWindow:window];
 }
 
 - (void)sceneDidBecomeActive:(UIScene*)scene
