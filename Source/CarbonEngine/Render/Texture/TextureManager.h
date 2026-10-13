@@ -112,6 +112,26 @@ public:
                                 const String& group = String::Empty);
 
     /**
+     * Retains a texture for the lifetime of this manager, or until explicitly released from the precache.
+     * Repeated calls for the same texture are idempotent. Loading follows the normal asynchronous texture path.
+     */
+    bool precacheTexture(const String& name, GraphicsInterface::TextureType type = GraphicsInterface::Texture2D);
+
+    /**
+     * Precaches textures found under Texture::TextureDirectory (or an absolute virtual directory).
+     * The extension filter can be empty to enumerate all files; use e.g. ".png" to restrict it.
+     */
+    void precacheTextureDirectory(const String& directory, const UnicodeString& extension = UnicodeString(),
+                                  bool recursive = true,
+                                  GraphicsInterface::TextureType type = GraphicsInterface::Texture2D);
+
+    /** Releases the manager-owned precache reference for a texture, if present. */
+    bool releasePrecachedTexture(const String& name);
+
+    /** Releases all manager-owned precache references. */
+    void releasePrecachedTextures();
+
+    /**
      * Returns a new 1x1 2D texture with the given name and RGBA color value.
      */
     const Texture2D* create1x12DTexture(const String& name, const Color& color);

@@ -11,6 +11,8 @@
 #include "CarbonEngine/Core/Threads/Mutex.h"
 #include "CarbonEngine/Core/Threads/Thread.h"
 #include "CarbonEngine/Globals.h"
+#include "CarbonEngine/Math/Color.h"
+#include <cstdio>
 
 namespace Carbon
 {
@@ -93,6 +95,7 @@ public:
     FileWriter file;
 
     OutputType currentOutputType = Logfile::Info;
+    Vector<std::pair<String, Color>> styles;
 
     bool isHookingEnabled = false;
     UnicodeString currentLineForOutputSinks;
@@ -209,7 +212,28 @@ UnicodeString Logfile::getFilename(const UnicodeString& logfileName)
 
 #endif
 
-void Logfile::writeLine(const String& caller, const UnicodeString& lineContent, OutputType type, bool writeTimestamp)
+void Logfile::setStyle(const String& name, const Color& color)
+{
+    auto lock = ScopedMutexLock(m->mutex);
+    for (auto& entry : m->styles)
+    {
+        if (entry.first == name)
+        {
+            entry.second = color;
+            return;
+        }
+    }
+    m->styles.append(std::make_pair(name, color));
+}
+
+void Logfile::removeStyle(const String& name)
+{
+    auto lock = ScopedMutexLock(m->mutex);
+    m->styles.eraseIf([&](const std::pair<String, Color>& entry) { return entry.first == name; });
+}
+
+void Logfile::writeLine(const String& caller, const UnicodeString& lineContent, OutputType type, bool writeTimestamp,
+                        const String& style)
 {
     auto lock = ScopedMutexLock(m->mutex);
 
@@ -227,7 +251,28 @@ void Logfile::writeLine(const String& caller, const UnicodeString& lineContent, 
         *this << "error";
     else if (type == Console)
         *this << "console";
-    *this << "'>";
+    *this << "'";
+    if (style.length())
+    {
+        for (const auto& entry : m->styles)
+        {
+            if (entry.first != style)
+                continue;
+
+            // CSS accepts an opaque RGB color; clamp components to avoid malformed values.
+            auto component = [](float value) -> unsigned int {
+                if (!(value >= 0.0f)) return 0;
+                if (value >= 1.0f) return 255;
+                return static_cast<unsigned int>(value * 255.0f + 0.5f);
+            };
+            char css[32];
+            std::snprintf(css, sizeof(css), " style='color:#%02X%02X%02X'",
+                          component(entry.second.r), component(entry.second.g), component(entry.second.b));
+            *this << css;
+            break;
+        }
+    }
+    *this << ">";
 
     m->isHookingEnabled = true;
 

@@ -1452,6 +1452,7 @@ bool Scene::releasePrecachedTexture(const String& name)
     {
         if (textures().areTextureNamesEquivalent(name, texture->getName()))
         {
+            textureReferences_.eraseValue(texture);
             textures().releaseTexture(texture);
             return true;
         }

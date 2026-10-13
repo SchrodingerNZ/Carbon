@@ -82,6 +82,7 @@ public:
     mutable Mutex mutex;
 
     Vector<Texture*> textures;
+    Vector<const Texture*> precachedTextures;
     std::unordered_map<String, TextureProperties> groups;
 
     bool enableTextureDeletion = true;
@@ -140,6 +141,7 @@ TextureManager::~TextureManager()
 
     m->completedTextureLoadThreadJobs.clear();
 
+    releasePrecachedTextures();
     enableTextureDeletion();
 
     for (auto texture : m->textures)
@@ -480,6 +482,63 @@ const Texture* TextureManager::setupTexture(GraphicsInterface::TextureType type,
     texture->load(name, group);
 
     return texture;
+}
+
+bool TextureManager::precacheTexture(const String& name, GraphicsInterface::TextureType type)
+{
+    auto lock = ScopedMutexLock(m->mutex);
+
+    for (auto texture : m->precachedTextures)
+    {
+        if (texture->getTextureType() == type && areTextureNamesEquivalent(texture->getName(), name))
+            return true;
+    }
+
+    auto texture = setupTexture(type, name);
+    if (!texture)
+        return false;
+
+    m->precachedTextures.append(texture);
+    return true;
+}
+
+void TextureManager::precacheTextureDirectory(const String& directory, const UnicodeString& extension,
+                                               bool recursive, GraphicsInterface::TextureType type)
+{
+    auto fullPath = (directory.startsWith("/") ? String::Empty : A(Texture::TextureDirectory)) + directory;
+
+    auto files = Vector<UnicodeString>();
+    fileSystem().enumerateFiles(fullPath, extension, recursive, files);
+
+    for (const auto& file : files)
+        precacheTexture(A(directory.length() ? FileSystem::joinPaths(directory, file) : file), type);
+}
+
+bool TextureManager::releasePrecachedTexture(const String& name)
+{
+    auto lock = ScopedMutexLock(m->mutex);
+
+    for (auto texture : m->precachedTextures)
+    {
+        if (areTextureNamesEquivalent(texture->getName(), name))
+        {
+            m->precachedTextures.eraseValue(texture);
+            releaseTexture(texture);
+            return true;
+        }
+    }
+
+    return false;
+}
+
+void TextureManager::releasePrecachedTextures()
+{
+    auto lock = ScopedMutexLock(m->mutex);
+
+    for (auto texture : m->precachedTextures)
+        releaseTexture(texture);
+
+    m->precachedTextures.clear();
 }
 
 Vector<String> TextureManager::getTextureNames() const

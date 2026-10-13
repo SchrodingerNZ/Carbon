@@ -28,6 +28,16 @@ namespace Carbon
  *
  * Output written to the logfile can be sent through arbitrary output sinks using Logfile::addOutputSink().
  */
+/** Selects a named visual style for a single logfile entry. Place this immediately after a LOG_* macro. */
+class CARBON_API LogStyle
+{
+public:
+    explicit LogStyle(String name) : name_(std::move(name)) {}
+    const String& getName() const { return name_; }
+private:
+    String name_;
+};
+
 class CARBON_API Logfile : private Noncopyable
 {
 public:
@@ -126,7 +136,14 @@ public:
     /**
      * Writes a line of output of the given type to this logfile.
      */
-    void writeLine(const String& caller, const UnicodeString& lineContent, OutputType type, bool writeTimestamp = true);
+    void writeLine(const String& caller, const UnicodeString& lineContent, OutputType type, bool writeTimestamp = true,
+                   const String& style = String::Empty);
+
+    /** Registers or replaces the foreground color of a named logfile style. */
+    void setStyle(const String& name, const Color& color);
+
+    /** Removes a registered style; entries using it revert to their normal severity appearance. */
+    void removeStyle(const String& name);
 
     /**
      * Writes the given lines to the logfile using the Logfile::writeLine() method.
@@ -165,10 +182,17 @@ public:
         }
 
 #ifdef CARBON_INCLUDE_LOGGING
-        ~LogfileWriter() { Logfile::get().writeLine(caller_, content_, outputType_); }
+        ~LogfileWriter() { Logfile::get().writeLine(caller_, content_, outputType_, true, style_); }
 #endif
 
 #ifdef CARBON_INCLUDE_LOGGING
+        /** Selects a visual style for this entry. Must precede ordinary text insertions. */
+        LogfileWriter& operator<<(const LogStyle& style)
+        {
+            style_ = style.getName();
+            return *this;
+        }
+
         /**
          * Concatenates the passed argument onto the internal string.
          */
@@ -184,6 +208,7 @@ public:
         const String caller_;
 
         UnicodeString content_;
+        String style_;
 #endif
     };
 
