@@ -25,6 +25,8 @@ xcuserdata/
 
 /Build/
 
+/Dependencies/Steamworks/
+/SDK/Windows/CarbonApplicationTemplateStage/
 /Dependencies/AngelScript-*/Library/
 /Dependencies/Bullet-*/Library/
 /Dependencies/FreeImage-*/Library/

@@ -4,6 +4,8 @@
 #
 
 require 'rexml/document'
+require 'fileutils'
+require "#{REPOSITORY_ROOT}/SDK/Steamworks.rb"
 
 # Subclass of SDKBuilderBase that creates the Windows SDK package.
 class WindowsSDKBuilder < SDKBuilderBase
@@ -24,6 +26,8 @@ class WindowsSDKBuilder < SDKBuilderBase
 
   def cleanup
     super
+
+    FileUtils.rm_rf @visual_studio_project_template_stage if @visual_studio_project_template_stage
 
     delete_visual_studio_project_template_archive
     delete_sample_application_visual_studio_project_files
@@ -70,12 +74,33 @@ class WindowsSDKBuilder < SDKBuilderBase
 
   def create_visual_studio_project_template_archive
     @visual_studio_project_template_archive = 'SDK/Windows/CarbonApplication.zip'
+    @visual_studio_project_template_stage = 'SDK/Windows/CarbonApplicationTemplateStage'
 
     FileUtils.rm_f @visual_studio_project_template_archive
+    FileUtils.rm_rf @visual_studio_project_template_stage
+    FileUtils.mkdir_p @visual_studio_project_template_stage
+    FileUtils.cp_r 'SDK/ProjectTemplates/VisualStudio2026/.', @visual_studio_project_template_stage
+
+    # Include runtime DLLs as project-root files in newly created projects, without adding Valve files to Git.
+    runtime_files = Steamworks.runtime_files
+    unless runtime_files.empty?
+      runtime_files.each do |name, source|
+        FileUtils.cp source, File.join(@visual_studio_project_template_stage, name)
+      end
+
+      manifest_path = File.join(@visual_studio_project_template_stage, 'CarbonApplication.vstemplate')
+      manifest = File.read manifest_path
+      marker = '    </Project>'
+      additions = runtime_files.keys.map do |name|
+        "      <ProjectItem TargetFileName=\"#{name}\">#{name}</ProjectItem>"
+      end.join("\n")
+      raise 'Could not locate Visual Studio project template content' unless manifest.include?(marker)
+      File.write manifest_path, manifest.sub(marker, "#{additions}\n#{marker}")
+    end
 
     run(
       "powershell -NoProfile -Command \"Compress-Archive " \
-      "-Path 'SDK/ProjectTemplates/VisualStudio2026/*' " \
+      "-Path '#{@visual_studio_project_template_stage}/*' " \
       "-DestinationPath '#{@visual_studio_project_template_archive}' " \
       '-Force"',
       error: 'Failed creating Visual Studio project template archive'
@@ -142,7 +167,12 @@ class WindowsSDKBuilder < SDKBuilderBase
     "SDK/Carbon SDK #{sdk_version}.exe"
   end
 
+  def steamworks_runtime_files
+    Steamworks.runtime_files.values
+  end
+
   def create_sdk_installer
+    Steamworks.report
     NSIS.nsis_with_script_content ERB.new(File.read('SDK/Windows/SDK.nsi.erb')).result(binding)
   end
 end

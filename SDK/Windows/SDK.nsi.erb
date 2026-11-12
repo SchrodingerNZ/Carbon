@@ -60,6 +60,11 @@ Section "Carbon Runtime Files" SectionRuntimeFiles
     File "Dependencies\PhysX-<%= CARBON_DEPENDENCIES[:PhysX] %>\Bin\Windows\x86\*.dll"
     File "Dependencies\PhysX-<%= CARBON_DEPENDENCIES[:PhysX] %>\Bin\Windows\x64\*.dll"
 
+    # Optional Steamworks runtime DLLs only (never development headers or import libraries).
+    <% steamworks_runtime_files.each do |runtime_file| %>
+    File "<%= NSIS.path runtime_file %>"
+    <% end %>
+
     # Licenses
     SetOutPath "$INSTDIR\Licenses"
     <% dependency_licenses do |license, dependency| %>

@@ -79,6 +79,28 @@ def GetDependencyPath(dependency, *paths, **keywords):
 Export('GetDependencyPath')
 
 
+# Steamworks is an optional, privately installed dependency. Keep its detection separate from the versioned public
+# dependencies, and never require it for normal Carbon builds.
+def GetSteamworksPath():
+    root = str(Dir(GetDependenciesPath()).srcnode())
+    sdk = os.path.join(root, 'Steamworks')
+
+    required = [
+        'public/steam/steam_api.h',
+        'redistributable_bin/steam_api.dll',
+        'redistributable_bin/steam_api.lib',
+        'redistributable_bin/win64/steam_api64.dll',
+        'redistributable_bin/win64/steam_api64.lib'
+    ]
+
+    if all(os.path.isfile(os.path.join(sdk, part)) for part in required):
+        return sdk
+
+    return None
+
+Export('GetSteamworksPath')
+
+
 # Returns the list of CPPDEFINES entries needed to include the specified dependencies in a build
 def GetDependencyCPPDEFINES(*dependencies):
     return ['CARBON_INCLUDE_' + d.upper() for d in dependencies]
