@@ -4,19 +4,15 @@
  */
 #pragma once
 
-#include "CarbonEngine/Core/InterfaceRegistry.h"
 
 namespace Carbon
 {
 
-/** Platform-specific achievement storage/reporting. A backend may initialise asynchronously. */
+/** Achievement storage/reporting supplied by the selected connection platform. */
 class CARBON_API AchievementInterface : private Noncopyable
 {
 public:
     virtual ~AchievementInterface() {}
-
-    /** Return false to let the registry try the next implementation. */
-    virtual bool isAvailable() const { return true; }
 
     /** Readiness is distinct from availability: future backends may load state asynchronously. */
     virtual bool isReady() const { return true; }
@@ -25,7 +21,5 @@ public:
     virtual bool setProgress(const String& id, unsigned int progress) = 0;
     virtual unsigned int getProgress(const String& id) const = 0;
 };
-
-CARBON_DECLARE_INTERFACE_REGISTRY(AchievementInterface);
 
 }

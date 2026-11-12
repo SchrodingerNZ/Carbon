@@ -6,6 +6,7 @@
 #include "CarbonEngine/Common.h"
 #include "CarbonEngine/Globals.h"
 #include "CarbonEngine/Game/Achievements.h"
+#include "CarbonEngine/Game/ConnectionPlatformInterface.h"
 #include "CarbonEngine/Core/BuildInfo.h"
 #include "CarbonEngine/Core/CoreEvents.h"
 #include "CarbonEngine/Core/EventManager.h"
@@ -55,6 +56,7 @@ String Globals::clientName_;
     CARBON_API Type& AccessorMethod() { return Globals::AccessorMethod(); }
 
 DEFINE_GLOBAL(AchievementManager, achievementManager_, achievements)
+ConnectionPlatformInterface* Globals::connectionPlatformInterface_;
 DEFINE_GLOBAL(Console, console_, console)
 DEFINE_GLOBAL(DataBufferManager, dataBufferManager_, dataBuffers)
 DEFINE_GLOBAL(EffectManager, effectManager_, effects)
@@ -156,14 +158,12 @@ bool Globals::initializeEngine(const String& clientName)
     LOG_INFO << "Physics interfaces: " << InterfaceRegistry<PhysicsInterface>::getImplementationNames();
     LOG_INFO << "Platform interfaces: " << InterfaceRegistry<PlatformInterface>::getImplementationNames();
     LOG_INFO << "Sound interfaces: " << InterfaceRegistry<SoundInterface>::getImplementationNames();
+    LOG_INFO << "Connection interfaces: " << InterfaceRegistry<ConnectionPlatformInterface>::getImplementationNames();
 
     // Core
     fileSystem_ = new FileSystem;
     eventManager_ = new EventManager;
     settingsManager_ = new SettingsManager;
-
-    // Achievements (select the highest-priority available backend)
-    achievementManager_ = new AchievementManager;
 
     // Platform
     console_ = new Console;
@@ -193,6 +193,14 @@ bool Globals::initializeEngine(const String& clientName)
 
     // Scripting
     scriptManager_ = new ScriptManager;
+
+    // Connection platform (selected last, after all engine subsystems are available)
+    connectionPlatformInterface_ = InterfaceRegistry<ConnectionPlatformInterface>::create();
+    if (connectionPlatformInterface_)
+        events().addHandler<UpdateEvent>(connectionPlatformInterface_);
+
+    // Achievements use the capability provided by the selected connection platform
+    achievementManager_ = new AchievementManager;
 
     isInitialized_ = true;
 
@@ -229,6 +237,15 @@ void Globals::uninitializeEngine()
     Globals::increaseLeakedResourceCount(Scene::getAllScenes().size());
     for (auto scene : Scene::getAllScenes())
         LOG_WARNING_WITHOUT_CALLER << "Leaked scene '" << scene->getName();
+
+    // Achievements and their owning connection platform are shut down first
+    delete achievementManager_;
+    achievementManager_ = nullptr;
+
+    if (connectionPlatformInterface_)
+        events().removeHandler<UpdateEvent>(connectionPlatformInterface_);
+    InterfaceRegistry<ConnectionPlatformInterface>::destroy();
+    connectionPlatformInterface_ = nullptr;
 
     // Scripting
     delete scriptManager_;
@@ -274,9 +291,6 @@ void Globals::uninitializeEngine()
     platformInterface_ = nullptr;
     delete console_;
     console_ = nullptr;
-
-    delete achievementManager_;
-    achievementManager_ = nullptr;
 
     // Core
     delete settingsManager_;

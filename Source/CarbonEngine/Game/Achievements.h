@@ -46,14 +46,7 @@ private:
 }
 
 // Stringified C++ symbol is the canonical platform achievement ID.
-#define CARBON_ACHIEVEMENT_BOOLEAN(Symbol, DisplayName)                                \
-    static const Carbon::AchievementDefinition Symbol = {#Symbol, DisplayName, 0};    \
+// Omitting Maximum value-initializes maxProgress to zero for boolean achievements.
+#define ACHIEVEMENT(Symbol, ...)                                                       \
+    static const Carbon::AchievementDefinition Symbol = {#Symbol, __VA_ARGS__};       \
     static const Carbon::AchievementRegistration Symbol##_registration(Symbol)
-
-#define CARBON_ACHIEVEMENT_PROGRESS(Symbol, DisplayName, Maximum)                       \
-    static const Carbon::AchievementDefinition Symbol = {#Symbol, DisplayName, Maximum}; \
-    static const Carbon::AchievementRegistration Symbol##_registration(Symbol)
-
-#define CARBON_ACHIEVEMENT_SELECT(_1, _2, _3, NAME, ...) NAME
-#define ACHIEVEMENT(...) CARBON_ACHIEVEMENT_SELECT(__VA_ARGS__, CARBON_ACHIEVEMENT_PROGRESS, \
-                                                  CARBON_ACHIEVEMENT_BOOLEAN)(__VA_ARGS__)

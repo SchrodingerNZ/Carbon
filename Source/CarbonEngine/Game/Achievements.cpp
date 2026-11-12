@@ -5,7 +5,7 @@
 #include "CarbonEngine/Common.h"
 #include "CarbonEngine/Game/Achievements.h"
 #include "CarbonEngine/Game/AchievementInterface.h"
-#include "CarbonEngine/Core/InterfaceRegistry.h"
+#include "CarbonEngine/Game/ConnectionPlatformInterface.h"
 
 namespace Carbon
 {
@@ -15,21 +15,27 @@ struct RegisteredAchievement
 {
     std::string displayName;
     unsigned int maxProgress;
+    bool conflicted = false;
 };
 
-// Intentionally process-lifetime: registration also occurs in static constructors/destructors.
+// Keep registration state in the Carbon DLL, with ordinary process-exit cleanup.
+// AchievementRegistration has no destructor that accesses this registry.
 std::unordered_map<std::string, RegisteredAchievement>& definitions()
 {
-    static auto* value = new std::unordered_map<std::string, RegisteredAchievement>;
-    return *value;
+    static std::unordered_map<std::string, RegisteredAchievement> value;
+    return value;
 }
 
 bool valid(const AchievementDefinition& achievement)
 {
     if (!achievement.id || !*achievement.id || !achievement.displayName)
         return false;
-    const auto it = definitions().find(achievement.id);
-    return it != definitions().end() && it->second.maxProgress == achievement.maxProgress &&
+    const auto& registry = definitions();
+    const auto it = registry.find(achievement.id);
+
+    // A conflicting declaration invalidates the canonical ID for all callers.
+    return it != registry.end() && !it->second.conflicted &&
+           it->second.maxProgress == achievement.maxProgress &&
            it->second.displayName == achievement.displayName;
 }
 }
@@ -38,11 +44,14 @@ AchievementRegistration::AchievementRegistration(const AchievementDefinition& de
 {
     if (!definition.id || !*definition.id || !definition.displayName)
         return;
-    const auto result = definitions().emplace(definition.id,
-                                               RegisteredAchievement{definition.displayName, definition.maxProgress});
+    auto& registry = definitions();
+    const auto result = registry.emplace(definition.id, RegisteredAchievement{definition.displayName,
+                                                                             definition.maxProgress});
+
+    // Identical declarations are harmless; conflicting metadata poisons the shared ID.
     if (!result.second && (result.first->second.displayName != definition.displayName ||
                            result.first->second.maxProgress != definition.maxProgress))
-        return; // Conflicting definitions are rejected by valid() at use time.
+        result.first->second.conflicted = true;
 }
 
 class AchievementManager::Members
@@ -53,12 +62,14 @@ public:
 
 AchievementManager::AchievementManager() : m(new Members)
 {
-    m->backend = InterfaceRegistry<AchievementInterface>::create();
+    // The active connection platform owns the achievement capability.
+    auto connection = InterfaceRegistry<ConnectionPlatformInterface>::getActiveInstance();
+    m->backend = connection ? &connection->getAchievements() : nullptr;
 }
 
 AchievementManager::~AchievementManager()
 {
-    InterfaceRegistry<AchievementInterface>::destroy();
+    // The connection platform owns the backend and outlives this manager.
     delete m;
 }
 

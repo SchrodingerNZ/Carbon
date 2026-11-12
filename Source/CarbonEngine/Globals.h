@@ -355,6 +355,7 @@ private:
     static String clientName_;
 
     static AchievementManager* achievementManager_;
+    static ConnectionPlatformInterface* connectionPlatformInterface_;
     static Console* console_;
     static DataBufferManager* dataBufferManager_;
     static EffectManager* effectManager_;

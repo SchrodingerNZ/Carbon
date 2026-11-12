@@ -546,6 +546,7 @@ class CARBON_API Parameter;
 class CARBON_API ParameterArray;
 class CARBON_API PeriodicTimer;
 class CARBON_API AchievementManager;
+class CARBON_API ConnectionPlatformInterface;
 class CARBON_API PhysicsInterface;
 class CARBON_API PhysicsIntersectResult;
 class CARBON_API Plane;

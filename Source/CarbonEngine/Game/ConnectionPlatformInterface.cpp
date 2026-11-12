@@ -3,17 +3,26 @@
  * If a copy of the MPL was not distributed with this file, You can obtain one at http://mozilla.org/MPL/2.0/.
  */
 #include "CarbonEngine/Common.h"
-#include "CarbonEngine/Game/AchievementInterface.h"
+#include "CarbonEngine/Core/CoreEvents.h"
+#include "CarbonEngine/Game/ConnectionPlatformInterface.h"
 
 namespace Carbon
 {
 
-CARBON_DEFINE_INTERFACE_REGISTRY(AchievementInterface)
+bool ConnectionPlatformInterface::processEvent(const Event& e)
+{
+    if (e.as<UpdateEvent>())
+        update();
+
+    return true;
+}
+
+CARBON_DEFINE_INTERFACE_REGISTRY(ConnectionPlatformInterface)
 {
     return i->isAvailable();
 }
 
-/** Non-persistent fallback; each engine initialization starts with empty progress. */
+/** Non-persistent achievement capability for the Null connection platform. */
 class NullAchievements : public AchievementInterface
 {
 public:
@@ -22,6 +31,7 @@ public:
         auto& current = progress_[id.cStr()];
         if (progress > current)
             current = progress;
+
         return true;
     }
 
@@ -35,6 +45,16 @@ private:
     std::unordered_map<std::string, unsigned int> progress_;
 };
 
-CARBON_REGISTER_INTERFACE_IMPLEMENTATION(AchievementInterface, NullAchievements, 0)
+/** Always available unless a client explicitly requests an alternative implementation. */
+class NullConnectionPlatform : public ConnectionPlatformInterface
+{
+public:
+    AchievementInterface& getAchievements() override { return achievements_; }
+
+private:
+    NullAchievements achievements_;
+};
+
+CARBON_REGISTER_INTERFACE_IMPLEMENTATION(ConnectionPlatformInterface, NullConnectionPlatform, 0)
 
 }
