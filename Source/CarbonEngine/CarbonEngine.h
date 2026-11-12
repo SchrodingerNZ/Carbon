@@ -50,6 +50,7 @@
 #include "CarbonEngine/Exporters/ExportRunners.h"
 #include "CarbonEngine/Exporters/ExporterStrings.h"
 #include "CarbonEngine/Exporters/ProgressDialog.h"
+#include "CarbonEngine/Game/Achievements.h"
 #include "CarbonEngine/Game/GameCenter.h"
 #include "CarbonEngine/Game/InAppPurchase.h"
 #include "CarbonEngine/Game/Pathfinding/AStarTraversal.h"

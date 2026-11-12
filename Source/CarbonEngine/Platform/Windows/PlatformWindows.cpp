@@ -266,13 +266,13 @@ bool PlatformWindows::changeScreenResolution(const Resolution& resolution) const
     dmScreenSettings.dmPelsWidth = resolution.getWidth();
     dmScreenSettings.dmPelsHeight = resolution.getHeight();
     dmScreenSettings.dmBitsPerPel = 32;
-    dmScreenSettings.dmDisplayFrequency = 60;
-    dmScreenSettings.dmFields = DM_BITSPERPEL | DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYFREQUENCY;
+    dmScreenSettings.dmFields = DM_BITSPERPEL | DM_PELSWIDTH | DM_PELSHEIGHT;
 
     // Set the new screen resolution
-    if (ChangeDisplaySettingsEx(nullptr, &dmScreenSettings, nullptr, CDS_FULLSCREEN, nullptr) != DISP_CHANGE_SUCCESSFUL)
+    auto result = ChangeDisplaySettingsEx(nullptr, &dmScreenSettings, nullptr, CDS_FULLSCREEN, nullptr);
+    if (result != DISP_CHANGE_SUCCESSFUL)
     {
-        LOG_ERROR << "ChangeDisplaySettingsEx(" << resolution << ") failed";
+        LOG_ERROR << "ChangeDisplaySettingsEx(" << resolution << ") failed with result " << result;
         return false;
     }
 

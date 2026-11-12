@@ -63,7 +63,6 @@
         #define ANDROID
 
         // Automatically configure the included components for Android
-        #define CARBON_INCLUDE_ANGELSCRIPT
         #define CARBON_INCLUDE_BULLET
         #define CARBON_INCLUDE_FREEIMAGE
         #define CARBON_INCLUDE_OPENAL
@@ -110,7 +109,6 @@
         #endif
 
         // Automatically configure the included components for iOS
-        #define CARBON_INCLUDE_ANGELSCRIPT
         #define CARBON_INCLUDE_BULLET
         #define CARBON_INCLUDE_FREEIMAGE
         #define CARBON_INCLUDE_OPENAL
@@ -547,6 +545,7 @@ class CARBON_API OculusRiftCameraController;
 class CARBON_API Parameter;
 class CARBON_API ParameterArray;
 class CARBON_API PeriodicTimer;
+class CARBON_API AchievementManager;
 class CARBON_API PhysicsInterface;
 class CARBON_API PhysicsIntersectResult;
 class CARBON_API Plane;
@@ -761,6 +760,9 @@ extern CARBON_API MeshManager& meshes();
 /**
  * Returns the global PhysicsInterface instance, this is shorthand for Globals::physics().
  */
+/** Returns the global achievement manager. */
+extern CARBON_API AchievementManager& achievements();
+
 extern CARBON_API PhysicsInterface& physics();
 
 /**

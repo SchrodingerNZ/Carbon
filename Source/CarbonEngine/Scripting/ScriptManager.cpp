@@ -464,6 +464,11 @@ bool ScriptManager::getCurrentGlobalFunctionCallbackPointers(void** instance, vo
     return false;
 }
 
+bool ScriptManager::registerGlobalVariable(const String& name, const String& type, void* variable)
+{
+    return false;
+}
+
 ScriptManager::ScriptInstance ScriptManager::run(const String& scriptName)
 {
     return nullptr;

@@ -5,6 +5,7 @@
 
 #include "CarbonEngine/Common.h"
 #include "CarbonEngine/Globals.h"
+#include "CarbonEngine/Game/Achievements.h"
 #include "CarbonEngine/Core/BuildInfo.h"
 #include "CarbonEngine/Core/CoreEvents.h"
 #include "CarbonEngine/Core/EventManager.h"
@@ -53,6 +54,7 @@ String Globals::clientName_;
     Type* Globals::MemberVariable;                          \
     CARBON_API Type& AccessorMethod() { return Globals::AccessorMethod(); }
 
+DEFINE_GLOBAL(AchievementManager, achievementManager_, achievements)
 DEFINE_GLOBAL(Console, console_, console)
 DEFINE_GLOBAL(DataBufferManager, dataBufferManager_, dataBuffers)
 DEFINE_GLOBAL(EffectManager, effectManager_, effects)
@@ -159,6 +161,9 @@ bool Globals::initializeEngine(const String& clientName)
     fileSystem_ = new FileSystem;
     eventManager_ = new EventManager;
     settingsManager_ = new SettingsManager;
+
+    // Achievements (select the highest-priority available backend)
+    achievementManager_ = new AchievementManager;
 
     // Platform
     console_ = new Console;
@@ -269,6 +274,9 @@ void Globals::uninitializeEngine()
     platformInterface_ = nullptr;
     delete console_;
     console_ = nullptr;
+
+    delete achievementManager_;
+    achievementManager_ = nullptr;
 
     // Core
     delete settingsManager_;

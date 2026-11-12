@@ -13,7 +13,9 @@ mayaExporterEnvs = []
 
 if platform == 'Windows':
 
-    dependencies = ['AngelScript', 'Bullet', 'FreeImage', 'FreeType', 'OpenAssetImport', 'PhysX', 'Vorbis', 'ZLib']
+    dependencies = ['Bullet', 'FreeImage', 'FreeType', 'OpenAssetImport', 'PhysX', 'Vorbis', 'ZLib']
+    if includeAngelScript:
+        dependencies.insert(0, 'AngelScript')
 
     # Environment for Carbon
     engineEnv = baseEnv.Clone()
@@ -81,7 +83,9 @@ if platform == 'Windows':
 
 elif platform == 'Linux' or platform == 'macOS':
 
-    dependencies = ['AngelScript', 'Bullet', 'FreeImage', 'FreeType', 'OpenAssetImport', 'Vorbis', 'ZLib']
+    dependencies = ['Bullet', 'FreeImage', 'FreeType', 'OpenAssetImport', 'Vorbis', 'ZLib']
+    if includeAngelScript:
+        dependencies.insert(0, 'AngelScript')
 
     if platform == 'Linux' or architecture == 'x64':
         dependencies += ['PhysX']
@@ -135,12 +139,16 @@ elif platform == 'Linux' or platform == 'macOS':
 
 elif platform == 'iOS' or platform == 'iOSSimulator':
 
-    dependencies = ['AngelScript', 'Bullet', 'FreeImage', 'OpenAssetImport', 'Vorbis', 'ZLib']
+    dependencies = ['Bullet', 'FreeImage', 'OpenAssetImport', 'Vorbis', 'ZLib']
+    if includeAngelScript:
+        dependencies.insert(0, 'AngelScript')
 
     # Environment for Carbon
     engineEnv = baseEnv.Clone()
     engineEnv['CPPPATH'] += ['#/Source']
     engineEnv['CPPPATH'] += GetDependencyCPPPATH(*dependencies)
+    if includeAngelScript:
+        engineEnv['CPPDEFINES'] += ['CARBON_INCLUDE_ANGELSCRIPT']
 
     # Build method for Carbon client applications
     def CarbonClientProgram(self, program, sources, **keywords):
@@ -154,11 +162,15 @@ elif platform == 'iOS' or platform == 'iOSSimulator':
 
 elif platform == 'Android':
 
-    dependencies = ['AngelScript', 'Bullet', 'FreeImage', 'OpenALSoft', 'OpenAssetImport', 'Vorbis', 'ZLib']
+    dependencies = ['Bullet', 'FreeImage', 'OpenALSoft', 'OpenAssetImport', 'Vorbis', 'ZLib']
+    if includeAngelScript:
+        dependencies.insert(0, 'AngelScript')
 
     # Environment for Carbon
     engineEnv = baseEnv.Clone()
     engineEnv['CPPPATH'] += ['#/Source'] + GetDependencyCPPPATH(*dependencies)
+    if includeAngelScript:
+        engineEnv['CPPDEFINES'] += ['CARBON_INCLUDE_ANGELSCRIPT']
 
     # Build method for Carbon client applications
     def CarbonClientProgram(self, program, sources, **keywords):

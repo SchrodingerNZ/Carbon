@@ -23,7 +23,8 @@ vars.AddVariables(
                    'against instead of building against the installed SDK. Note that this does not cause the specified '
                    'Carbon repository itself to be rebuilt.'),
     ('static', '(true/false) Whether to build/use CarbonEngine as a static library instead of a dynamic library. Some '
-               'platforms do not support building as a dynamic library.')
+               'platforms do not support building as a dynamic library.'),
+    ('angelscript', '(true/false) Enable the AngelScript scripting backend.', 'false')
 )
 Help(vars.GenerateHelpText(Environment()))
 
@@ -35,7 +36,12 @@ if buildType not in ['Debug', 'Release']:
 isDebugBuild = (buildType == 'Debug')
 isReleaseBuild = (buildType == 'Release')
 isStrictBuild = (ARGUMENTS.get('strict', 'false') == 'true')
-Export('buildType', 'isDebugBuild', 'isReleaseBuild', 'isStrictBuild')
+angelScriptOption = ARGUMENTS.get('angelscript', 'false').lower()
+if angelScriptOption not in ('true', 'false'):
+    print('Error: angelscript must be true or false')
+    Exit(1)
+includeAngelScript = (angelScriptOption == 'true')
+Export('buildType', 'isDebugBuild', 'isReleaseBuild', 'isStrictBuild', 'includeAngelScript')
 
 
 # Returns the path to the Dependencies directory relative to the calling SConstruct file.

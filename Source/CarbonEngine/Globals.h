@@ -171,6 +171,12 @@ public:
     /**
      * Returns the global Console instance.
      */
+    static AchievementManager& achievements()
+    {
+        assert(achievementManager_);
+        return *achievementManager_;
+    }
+
     static Console& console()
     {
         assert(console_);
@@ -348,6 +354,7 @@ private:
     static std::array<char, 256> clientNameBuffer_;
     static String clientName_;
 
+    static AchievementManager* achievementManager_;
     static Console* console_;
     static DataBufferManager* dataBufferManager_;
     static EffectManager* effectManager_;
