@@ -93,7 +93,7 @@ bool AchievementManager::setProgress(const AchievementDefinition& achievement, u
         progress = 1;
     if (achievement.maxProgress && progress > achievement.maxProgress)
         progress = achievement.maxProgress;
-    return m->backend->setProgress(achievement.id, progress);
+    return m->backend->setProgress(achievement.id, progress, achievement.maxProgress);
 }
 
 bool AchievementManager::mergeProgress(const AchievementDefinition& achievement, unsigned int progress)
@@ -105,7 +105,7 @@ unsigned int AchievementManager::getProgress(const AchievementDefinition& achiev
 {
     if (!valid(achievement) || !m->backend)
         return 0;
-    return m->backend->getProgress(achievement.id);
+    return m->backend->getProgress(achievement.id, achievement.maxProgress);
 }
 
 bool AchievementManager::isGranted(const AchievementDefinition& achievement) const

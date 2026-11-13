@@ -197,7 +197,15 @@ bool Globals::initializeEngine(const String& clientName)
     // Connection platform (selected last, after all engine subsystems are available)
     connectionPlatformInterface_ = InterfaceRegistry<ConnectionPlatformInterface>::create();
     if (connectionPlatformInterface_)
+    {
+        const auto selected = InterfaceRegistry<ConnectionPlatformInterface>::getActiveImplementation();
+        if (selected)
+            LOG_INFO << "Active connection platform: " << selected->getName();
+
         events().addHandler<UpdateEvent>(connectionPlatformInterface_);
+    }
+    else
+        LOG_WARNING_WITHOUT_CALLER << "No connection platform was initialized";
 
     // Achievements use the capability provided by the selected connection platform
     achievementManager_ = new AchievementManager;

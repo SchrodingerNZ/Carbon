@@ -18,8 +18,8 @@ public:
     virtual bool isReady() const { return true; }
 
     /** Absolute, monotonically increasing progress. The manager validates and clamps input. */
-    virtual bool setProgress(const String& id, unsigned int progress) = 0;
-    virtual unsigned int getProgress(const String& id) const = 0;
+    virtual bool setProgress(const String& id, unsigned int progress, unsigned int maxProgress) = 0;
+    virtual unsigned int getProgress(const String& id, unsigned int maxProgress) const = 0;
 };
 
 }
