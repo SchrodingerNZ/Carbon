@@ -8,8 +8,10 @@
 #include "CarbonEngine/Game/ConnectionPlatformInterface.h"
 
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <map>
 
 namespace Carbon
 {
@@ -356,6 +358,57 @@ public:
     using GetLobbyDataFunction = const char* (__cdecl *)(void*, uint64_t, const char*);
     using GetAPICallResultFunction = bool (__cdecl *)(int, uint64_t, void*, int, int, bool*);
 
+    // The Steam flat interface keeps Steamworks headers out of Carbon's public SDK.
+    using GetSocketsFunction = void* (__cdecl *)();
+    using CreateListenSocketFunction = uint32_t (__cdecl *)(void*, int, int, const void*);
+    using ConnectP2PFunction = uint32_t (__cdecl *)(void*, const void*, int, int, const void*);
+    using AcceptConnectionFunction = int (__cdecl *)(void*, uint32_t);
+    using CloseConnectionFunction = bool (__cdecl *)(void*, uint32_t, int, const char*, bool);
+    using CloseListenSocketFunction = bool (__cdecl *)(void*, uint32_t);
+    using SendMessageFunction = int (__cdecl *)(void*, uint32_t, const void*, uint32_t, int, int64_t*);
+    using ReceiveMessagesFunction = int (__cdecl *)(void*, uint32_t, void**, int);
+    using ReleaseMessageFunction = void (__cdecl *)(void*);
+    using GetConnectionInfoFunction = bool (__cdecl *)(void*, uint32_t, void*);
+    using GetLobbyOwnerFunction = uint64_t (__cdecl *)(void*, uint64_t);
+    using GetLobbyMemberCountFunction = int (__cdecl *)(void*, uint64_t);
+    using GetLobbyMemberFunction = uint64_t (__cdecl *)(void*, uint64_t, int);
+
+    // SteamNetworkingIdentity: 32-bit type + 32-bit size + 128 bytes of identity data.
+    // SteamID identities have type 16 and place the 64-bit user ID at byte offset 8.
+    struct SteamIdentity
+    {
+        int32_t type = 16;
+        int32_t size = 8;
+        uint64_t steamID = 0;
+        unsigned char reserved[120] = {};
+    };
+    static_assert(sizeof(SteamIdentity) == 136, "Unexpected SteamNetworkingIdentity layout");
+
+    // SteamNetConnectionInfo_t's initial fields. The full Steam structure contains
+    // additional debugging strings and reserved fields, so GetConnectionInfo is
+    // given a separate, generously sized buffer rather than this prefix alone.
+    // The layout follows Steam's documented types, including the explicit IP
+    // address padding field. Do not decode the nested callback payload directly.
+    struct SteamConnectionInfoPrefix
+    {
+        SteamIdentity remote;
+        int64_t userData;
+        uint32_t listenSocket;
+        unsigned char remoteAddress[18];
+        uint16_t padding;
+        uint32_t remotePOP;
+        uint32_t relayPOP;
+        int32_t state;
+    };
+    static_assert(offsetof(SteamConnectionInfoPrefix, listenSocket) == 144, "Unexpected Steam listen socket offset");
+    static_assert(offsetof(SteamConnectionInfoPrefix, state) == 176, "Unexpected Steam connection state offset");
+
+    struct PeerConnection
+    {
+        uint32_t handle = 0;
+        bool connected = false;
+    };
+
     void initialize(const SharedLibrary& library)
     {
         // The same matchmaking interface owns discovery and lobby lifetime.
@@ -372,6 +425,30 @@ public:
         setLobbyData_ = library.mapFunction<SetLobbyDataFunction>("SteamAPI_ISteamMatchmaking_SetLobbyData");
         getLobbyData_ = library.mapFunction<GetLobbyDataFunction>("SteamAPI_ISteamMatchmaking_GetLobbyData");
         getCallResult_ = library.mapFunction<GetAPICallResultFunction>("SteamAPI_ManualDispatch_GetAPICallResult");
+        getLobbyOwner_ = library.mapFunction<GetLobbyOwnerFunction>("SteamAPI_ISteamMatchmaking_GetLobbyOwner");
+        getLobbyMemberCount_ = library.mapFunction<GetLobbyMemberCountFunction>("SteamAPI_ISteamMatchmaking_GetNumLobbyMembers");
+        getLobbyMember_ = library.mapFunction<GetLobbyMemberFunction>("SteamAPI_ISteamMatchmaking_GetLobbyMemberByIndex");
+
+        // Steam Networking Sockets are resolved dynamically like the matchmaking API.
+        auto getSockets = library.mapFunction<GetSocketsFunction>("SteamAPI_SteamNetworkingSockets_SteamAPI_v012");
+        if (!getSockets)
+            getSockets = library.mapFunction<GetSocketsFunction>("SteamAPI_SteamNetworkingSockets_SteamAPI_v011");
+
+        createListenSocket_ = library.mapFunction<CreateListenSocketFunction>("SteamAPI_ISteamNetworkingSockets_CreateListenSocketP2P");
+        connectP2P_ = library.mapFunction<ConnectP2PFunction>("SteamAPI_ISteamNetworkingSockets_ConnectP2P");
+        acceptConnection_ = library.mapFunction<AcceptConnectionFunction>("SteamAPI_ISteamNetworkingSockets_AcceptConnection");
+        closeConnection_ = library.mapFunction<CloseConnectionFunction>("SteamAPI_ISteamNetworkingSockets_CloseConnection");
+        closeListenSocket_ = library.mapFunction<CloseListenSocketFunction>("SteamAPI_ISteamNetworkingSockets_CloseListenSocket");
+        sendMessage_ = library.mapFunction<SendMessageFunction>("SteamAPI_ISteamNetworkingSockets_SendMessageToConnection");
+        receiveMessages_ = library.mapFunction<ReceiveMessagesFunction>("SteamAPI_ISteamNetworkingSockets_ReceiveMessagesOnConnection");
+        releaseMessage_ = library.mapFunction<ReleaseMessageFunction>("SteamAPI_SteamNetworkingMessage_t_Release");
+        getConnectionInfo_ = library.mapFunction<GetConnectionInfoFunction>("SteamAPI_ISteamNetworkingSockets_GetConnectionInfo");
+        sockets_ = getSockets ? getSockets() : nullptr;
+
+        socketsAvailable_ = sockets_ && getLobbyOwner_ && getLobbyMemberCount_ && getLobbyMember_ &&
+                            createListenSocket_ && connectP2P_ && acceptConnection_ && closeConnection_ &&
+                            closeListenSocket_ && sendMessage_ && receiveMessages_ && releaseMessage_ &&
+                            getConnectionInfo_;
         matchmaking_ = getMatchmaking ? getMatchmaking() : nullptr;
 
         available_ = matchmaking_ && addFilter_ && requestList_ && getLobbyByIndex_ && createLobby_ &&
@@ -381,6 +458,9 @@ public:
             LOG_INFO << "Steam multiplayer: lobby discovery/hosting/joining available";
         else
             LOG_WARNING_WITHOUT_CALLER << "Steam multiplayer: required matchmaking exports unavailable";
+
+        if (!socketsAvailable_)
+            LOG_WARNING_WITHOUT_CALLER << "Steam multiplayer: Networking Sockets exports unavailable";
     }
 
     ~SteamMultiplayer() override { leaveLobby(); }
@@ -392,6 +472,187 @@ public:
     bool isInLobby() const override { return lobbyID_ != 0; }
     bool isLobbyPending() const override { return pendingLobbyCall_ != 0 || pendingRole_ != Role::None; }
     uint64_t getLobbyID() const override { return lobbyID_; }
+
+    unsigned int getConnectedPeerCount() const override
+    {
+        unsigned int count = 0;
+        for (const auto& peer : peers_)
+        {
+            if (peer.second.connected)
+                ++count;
+        }
+        return count;
+    }
+
+    PeerID getConnectedPeer(unsigned int index) const override
+    {
+        for (const auto& peer : peers_)
+        {
+            if (peer.second.connected && index-- == 0)
+                return peer.first;
+        }
+        return 0;
+    }
+
+    bool send(PeerID peer, const NetFrame& frame) override
+    {
+        // A frame may be sent only to an established, authenticated lobby peer.
+        const auto found = peers_.find(peer);
+        if (!socketsAvailable_ || !lobbyID_ || found == peers_.end() || !found->second.connected ||
+            !isLobbyMember(peer))
+            return false;
+
+        // Serialize once; Steam accepts the buffer's explicit length and copies it for reliable delivery.
+        Vector<byte_t> data;
+        if (!frame.encode(data) || data.empty() || data.size() > 512 * 1024)
+            return false;
+
+        // k_nSteamNetworkingSend_Reliable = 8; 1 means k_EResultOK.
+        const auto status = sendMessage_(sockets_, found->second.handle, data.getData(),
+                                         uint32_t(data.size()), 8, nullptr);
+        if (status != 1)
+            LOG_WARNING_WITHOUT_CALLER << "Steam multiplayer: failed to send NetFrame to peer " << peer
+                                       << ", Steam result " << status;
+
+        return status == 1;
+    }
+
+    // Called from the connection platform's existing main-thread manual callback loop.
+    void onConnectionStatus(const unsigned char* data, int size)
+    {
+        // SteamNetConnectionStatusChangedCallback_t starts with the connection handle.
+        // Endeavor's working Steam implementation queries the current state and
+        // authenticated identity with GetConnectionInfo rather than decoding the
+        // nested SteamNetConnectionInfo_t from callback memory.
+        if (!socketsAvailable_ || !data || size < int(sizeof(uint32_t)))
+            return;
+
+        uint32_t handle = 0;
+        memcpy(&handle, data, sizeof(handle));
+        if (!handle)
+            return;
+
+        // Steam writes the complete connection info, not just its prefix.
+        // Reserve enough aligned space for the current Steam ABI structure.
+        alignas(8) unsigned char storage[1024] = {};
+        if (!getConnectionInfo_(sockets_, handle, storage))
+        {
+            LOG_WARNING_WITHOUT_CALLER << "Steam multiplayer: GetConnectionInfo failed for handle " << handle;
+            return;
+        }
+
+        SteamConnectionInfoPrefix info = {};
+        memcpy(&info, storage, sizeof(info));
+
+        const auto peer = info.remote.steamID;
+        const auto identityType = info.remote.type;
+        const auto listen = info.listenSocket;
+        const auto state = info.state;
+
+        LOG_INFO << "Steam multiplayer: connection handle=" << handle
+                 << " state=" << state << " peer=" << peer
+                 << " identityType=" << identityType << " listen=" << listen
+                 << " localListen=" << listenSocket_;
+
+        // k_ESteamNetworkingConnectionState_Connecting = 1.
+        if (state == 1 && listen != 0)
+        {
+            // Reject unsolicited connections and peers not belonging to our current lobby.
+            if (listen != listenSocket_ || identityType != 16 || !isLobbyMember(peer) ||
+                peers_.find(peer) != peers_.end())
+            {
+                closeConnection_(sockets_, handle, 0, "Not a permitted lobby peer", false);
+                return;
+            }
+
+            if (acceptConnection_(sockets_, handle) != 1)
+            {
+                closeConnection_(sockets_, handle, 0, "Failed to accept connection", false);
+                return;
+            }
+
+            peers_[peer] = {handle, false};
+            LOG_INFO << "Steam multiplayer: accepting connection from peer " << peer;
+        }
+
+        // k_ESteamNetworkingConnectionState_Connected = 3.
+        if (state == 3)
+        {
+            const auto found = peers_.find(peer);
+            if (identityType != 16 || !isLobbyMember(peer) || found == peers_.end() ||
+                found->second.handle != handle)
+            {
+                closeConnection_(sockets_, handle, 0, "Unexpected network connection", false);
+                return;
+            }
+
+            found->second.connected = true;
+            LOG_INFO << "Steam multiplayer: peer connected " << peer;
+        }
+
+        // ClosedByPeer = 4, ProblemDetectedLocally = 5.
+        if (state == 4 || state == 5)
+        {
+            for (auto it = peers_.begin(); it != peers_.end(); ++it)
+            {
+                if (it->second.handle == handle)
+                {
+                    LOG_INFO << "Steam multiplayer: peer disconnected " << it->first;
+                    peers_.erase(it);
+                    break;
+                }
+            }
+
+            closeConnection_(sockets_, handle, 0, "Connection ended", false);
+        }
+    }
+
+    void updateSockets()
+    {
+        if (!socketsAvailable_ || !lobbyID_)
+            return;
+
+        // Snapshot connection handles because callbacks can leave the lobby during dispatch.
+        const auto connections = peers_;
+        for (const auto& peer : connections)
+        {
+            if (!peer.second.connected)
+                continue;
+
+            for (unsigned int batch = 0; batch < 32; ++batch)
+            {
+                const auto live = peers_.find(peer.first);
+                if (!lobbyID_ || live == peers_.end() || live->second.handle != peer.second.handle)
+                    break;
+
+                void* messages[16] = {};
+                const auto count = receiveMessages_(sockets_, peer.second.handle, messages, 16);
+                if (count <= 0)
+                    break;
+
+                for (int index = 0; index < count; ++index)
+                {
+                    // SteamNetworkingMessage_t begins with payload pointer and 32-bit size.
+                    void* payload = nullptr;
+                    int32_t length = 0;
+                    memcpy(&payload, messages[index], sizeof(payload));
+                    memcpy(&length, static_cast<const unsigned char*>(messages[index]) + sizeof(payload), sizeof(length));
+
+                    NetFrame frame;
+                    if (payload && length > 0 && length <= 512 * 1024 && lobbyID_ &&
+                        peers_.find(peer.first) != peers_.end() && isLobbyMember(peer.first) &&
+                        NetFrame::decode(static_cast<const byte_t*>(payload), uint32_t(length), frame))
+                    {
+                        dispatchNetFrame(peer.first, frame);
+                    }
+                    else
+                        LOG_WARNING_WITHOUT_CALLER << "Steam multiplayer: rejected malformed NetFrame";
+
+                    releaseMessage_(messages[index]);
+                }
+            }
+        }
+    }
 
     bool findLobbies(const String& networkVersion) override
     {
@@ -472,6 +733,9 @@ public:
 
     void leaveLobby() override
     {
+        // Close all peer sockets before leaving the lobby.
+        closeSockets();
+
         // Invalidate pending operations; late entry callbacks are rejected below.
         pendingRole_ = Role::None;
         pendingLobbyCall_ = 0;
@@ -547,11 +811,39 @@ public:
             }
         }
 
+        pendingEntryWasHost_ = pendingRole_ == Role::Host;
         lobbyID_ = enteredID;
         pendingLobbyCall_ = 0;
         pendingRole_ = Role::None;
         requestedLobbyID_ = 0;
         LOG_INFO << "Steam multiplayer: entered lobby " << lobbyID_ << " (network " << networkVersion_ << ")";
+
+        // The host listens; guests initiate their connection to the authoritative lobby owner.
+        if (socketsAvailable_)
+        {
+            const auto owner = getLobbyOwner_(matchmaking_, lobbyID_);
+            if (owner && pendingEntryWasHost_)
+            {
+                listenSocket_ = createListenSocket_(sockets_, 0, 0, nullptr);
+                if (!listenSocket_)
+                    LOG_WARNING_WITHOUT_CALLER << "Steam multiplayer: could not open P2P listen socket";
+                else
+                    LOG_INFO << "Steam multiplayer: listening for P2P peers";
+            }
+            else if (owner)
+            {
+                SteamIdentity identity;
+                identity.steamID = owner;
+                const auto handle = connectP2P_(sockets_, &identity, 0, 0, nullptr);
+                if (handle)
+                {
+                    peers_[owner] = {handle, false};
+                    LOG_INFO << "Steam multiplayer: connecting to lobby owner " << owner;
+                }
+                else
+                    LOG_WARNING_WITHOUT_CALLER << "Steam multiplayer: ConnectP2P failed";
+            }
+        }
     }
 
     void onCallCompleted(int pipe, uint64_t call, int callbackID, int payloadSize)
@@ -617,6 +909,36 @@ public:
 
 private:
     enum class Role { None, Host, Guest };
+
+    bool isLobbyMember(uint64_t peer) const
+    {
+        if (!lobbyID_ || !peer || !getLobbyMemberCount_ || !getLobbyMember_)
+            return false;
+
+        const auto count = getLobbyMemberCount_(matchmaking_, lobbyID_);
+        for (int index = 0; index < count; ++index)
+        {
+            if (getLobbyMember_(matchmaking_, lobbyID_, index) == peer)
+                return true;
+        }
+
+        return false;
+    }
+
+    void closeSockets()
+    {
+        if (sockets_ && closeConnection_)
+        {
+            for (const auto& peer : peers_)
+                closeConnection_(sockets_, peer.second.handle, 0, "Leaving lobby", false);
+        }
+        peers_.clear();
+
+        if (listenSocket_ && sockets_ && closeListenSocket_)
+            closeListenSocket_(sockets_, listenSocket_);
+        listenSocket_ = 0;
+        pendingEntryWasHost_ = false;
+    }
     void* matchmaking_ = nullptr;
     AddFilterFunction addFilter_ = nullptr;
     RequestListFunction requestList_ = nullptr;
@@ -637,6 +959,23 @@ private:
     bool available_ = false;
     bool searching_ = false;
     bool completed_ = false;
+    bool socketsAvailable_ = false;
+    bool pendingEntryWasHost_ = false;
+    void* sockets_ = nullptr;
+    uint32_t listenSocket_ = 0;
+    std::map<uint64_t, PeerConnection> peers_;
+    GetLobbyOwnerFunction getLobbyOwner_ = nullptr;
+    GetLobbyMemberCountFunction getLobbyMemberCount_ = nullptr;
+    GetLobbyMemberFunction getLobbyMember_ = nullptr;
+    CreateListenSocketFunction createListenSocket_ = nullptr;
+    ConnectP2PFunction connectP2P_ = nullptr;
+    AcceptConnectionFunction acceptConnection_ = nullptr;
+    CloseConnectionFunction closeConnection_ = nullptr;
+    CloseListenSocketFunction closeListenSocket_ = nullptr;
+    SendMessageFunction sendMessage_ = nullptr;
+    ReceiveMessagesFunction receiveMessages_ = nullptr;
+    ReleaseMessageFunction releaseMessage_ = nullptr;
+    GetConnectionInfoFunction getConnectionInfo_ = nullptr;
 };
 
 /** Steam lifecycle with manual dispatch so callbacks reach Carbon without Steam SDK linkage. */
@@ -771,6 +1110,15 @@ public:
                 multiplayer_.onCallCompleted(steamPipe_, call, callbackID, payloadSize);
             }
 
+            // Track networking callbacks before attempting to interpret their layouts.
+            if (callback.callback >= 1200 && callback.callback < 1300)
+                LOG_INFO << "Steam P2P diagnostic: raw callback ID=" << callback.callback
+                         << " size=" << callback.size;
+
+            // SteamNetConnectionStatusChangedCallback_t = 1221.
+            if (callback.callback == 1221 && callback.data)
+                multiplayer_.onConnectionStatus(callback.data, callback.size);
+
             // LobbyEnter_t (504) is delivered as an ordinary callback as well as a call result.
             if (callback.callback == 504 && callback.data)
                 multiplayer_.onLobbyEntered(callback.data, callback.size);
@@ -778,6 +1126,7 @@ public:
             freeCallback_(steamPipe_);
         }
 
+        multiplayer_.updateSockets();
         achievements_.update();
     }
 

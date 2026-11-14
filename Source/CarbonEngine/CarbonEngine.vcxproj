@@ -688,6 +688,7 @@
     <ClCompile Include="Core\Memory\MemoryValidator.cpp" />
     <ClCompile Include="Core\Parameter.cpp" />
     <ClCompile Include="Core\ParameterArray.cpp" />
+    <ClCompile Include="Game\NetFrame.cpp" />
     <ClCompile Include="Core\Runnable.cpp" />
     <ClCompile Include="Core\SettingsManager.cpp" />
     <ClCompile Include="Core\SharedLibrary.cpp" />
@@ -887,6 +888,7 @@
     <ClInclude Include="Core\Noncopyable.h" />
     <ClInclude Include="Core\Parameter.h" />
     <ClInclude Include="Core\ParameterArray.h" />
+    <ClInclude Include="Game\NetFrame.h" />
     <ClInclude Include="Core\Runnable.h" />
     <ClInclude Include="Core\SettingsManager.h" />
     <ClInclude Include="Core\SharedLibrary.h" />

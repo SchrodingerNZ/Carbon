@@ -7,12 +7,14 @@
 #include "CarbonEngine/Core/EventHandler.h"
 #include "CarbonEngine/Core/InterfaceRegistry.h"
 #include "CarbonEngine/Game/AchievementInterface.h"
+#include "CarbonEngine/Game/NetFrame.h"
 #include <cstdint>
+#include <functional>
 
 namespace Carbon
 {
 
-/** Game-independent lobby discovery. Peer sockets and game messages are a later capability. */
+/** Game-independent lobby discovery and network frame delivery. */
 class CARBON_API MultiplayerInterface : private Noncopyable
 {
 public:
@@ -44,6 +46,38 @@ public:
     virtual bool isInLobby() const { return false; }
     virtual bool isLobbyPending() const { return false; }
     virtual uint64_t getLobbyID() const { return 0; }
+
+    /** Platform-neutral peer identifier. For Steam, this is the authenticated Steam user ID. */
+    using PeerID = uint64_t;
+
+    /** Called on Carbon's update thread after a complete network frame is validated. */
+    using NetFrameCallback = void (*)(void* context, PeerID sender, const NetFrame& frame);
+
+    /** Install or clear the callback. The owner must unregister before destruction. */
+    void setNetFrameCallback(NetFrameCallback callback, void* context = nullptr)
+    {
+        netFrameCallback_ = callback;
+        netFrameContext_ = context;
+    }
+
+    /** Send a reliable frame to a connected peer. False means not submitted. */
+    virtual bool send(PeerID peer, const NetFrame& frame) { return false; }
+
+    /** Connected, authenticated members of the current lobby (not pending connections). */
+    virtual unsigned int getConnectedPeerCount() const { return 0; }
+    virtual PeerID getConnectedPeer(unsigned int index) const { return 0; }
+
+protected:
+    /** Providers call this only after authenticating the sender and decoding the frame. */
+    void dispatchNetFrame(PeerID sender, const NetFrame& frame)
+    {
+        if (netFrameCallback_)
+            netFrameCallback_(netFrameContext_, sender, frame);
+    }
+
+private:
+    NetFrameCallback netFrameCallback_ = nullptr;
+    void* netFrameContext_ = nullptr;
 };
 
 /** The single selected external gaming connection; capabilities share its lifetime. */
