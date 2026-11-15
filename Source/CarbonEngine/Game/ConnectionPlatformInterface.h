@@ -8,9 +8,9 @@
 #include "CarbonEngine/Core/InterfaceRegistry.h"
 #include "CarbonEngine/Game/AchievementInterface.h"
 #include "CarbonEngine/Game/NetFrame.h"
+#include "CarbonEngine/Game/MultiplayerEvents.h"
 #include "CarbonEngine/Game/MultiplayerSession.h"
 #include <cstdint>
-#include <functional>
 
 namespace Carbon
 {
@@ -21,10 +21,10 @@ class CARBON_API MultiplayerInterface : private Noncopyable
 public:
     virtual ~MultiplayerInterface() {}
 
-    /** Whether this provider can perform Steam-style matchmaking requests. */
+    /** Whether the selected provider supports multiplayer matchmaking. */
     virtual bool isAvailable() const { return false; }
 
-    /** Start a filtered asynchronous lobby search. Returns false if it could not be submitted. */
+    /** Start an asynchronous lobby search. False means the request was not submitted; no completion event follows. */
     virtual bool findLobbies(const String& networkVersion) { return false; }
 
     /** True while the most recently requested search is in flight. */
@@ -35,10 +35,10 @@ public:
 
     virtual unsigned int getLobbyCount() const { return 0; }
 
-    /** Create a public lobby. Ownership, entry and metadata publication are asynchronous. */
+    /** Create a public lobby. Successful submission is followed by an operation-completion event. */
     virtual bool createLobby(const String& networkVersion, unsigned int maxMembers) { return false; }
 
-    /** Join a lobby returned by the most recent successful search. */
+    /** Join a discovered lobby. False means no asynchronous operation was started. */
     virtual bool joinLobby(unsigned int index, const String& networkVersion) { return false; }
 
     /** Leave the current lobby and invalidate outstanding lobby operations. */
@@ -48,69 +48,59 @@ public:
     virtual bool isLobbyPending() const { return false; }
     virtual uint64_t getLobbyID() const { return 0; }
 
-    /** Session registry. Players and their IDs are identical on every member machine. */
+    /** Current local session snapshot. Registry and metadata updates are reconciled across participants. */
     const MultiplayerSession& getSession() const { return session_; }
 
-    /** Host locks the player roster and enters Syncing. Gameplay waits for the synchronization barrier. */
+    /** Stage a host-owned metadata value. Changes remain private until publishMetadata(). Lobby only. */
+    virtual bool setSessionMetadata(const String& key, const String& value) { return false; }
+
+    /** Stage the removal of a host-owned metadata key. Lobby only. */
+    virtual bool removeSessionMetadata(const String& key) { return false; }
+
+    /** Publish all staged metadata as a single manifest revision. False leaves edits staged for retry. */
+    virtual bool publishMetadata() { return false; }
+
+    /** Host freezes the roster and published metadata. Gameplay begins after all participants are ready. */
     virtual bool startGame() { return false; }
 
-    /** Report whether this instance has completed game preparation for the locked roster. */
+    /** Report local preparation completed for the validated frozen session configuration. */
     virtual bool setReady(bool ready) { return false; }
 
-    /** Called after a session state change; callbacks run on the thread that processes the transition. */
-    using SessionStateCallback = void (*)(void* context, MultiplayerSessionState previous, MultiplayerSessionState current);
+    /** Send a reliable frame to a connected remote session participant. False means not submitted. */
+    virtual bool send(PlayerID recipient, const NetFrame& frame) { return false; }
 
-    /** Install or clear the callback. The owner must unregister before destruction. */
-    void setSessionStateCallback(SessionStateCallback callback, void* context = nullptr)
-    {
-        sessionStateCallback_ = callback;
-        sessionStateContext_ = context;
-    }
+    /** Submit a reliable frame to all connected remote participants, without local echo.
+        Returns true only if at least one recipient exists and every submission succeeds. */
+    virtual bool broadcast(const NetFrame& frame) { return false; }
 
-    /** Platform-neutral peer identifier for the legacy transport API (SteamID on Steam). */
-    using PeerID = uint64_t;
-
-    /** Called on Carbon's update thread after a complete network frame is validated. */
-    using NetFrameCallback = void (*)(void* context, PeerID sender, const NetFrame& frame);
-
-    /** Install or clear the callback. The owner must unregister before destruction. */
-    void setNetFrameCallback(NetFrameCallback callback, void* context = nullptr)
-    {
-        netFrameCallback_ = callback;
-        netFrameContext_ = context;
-    }
-
-    /** Send a reliable frame to a connected peer. False means not submitted. */
-    virtual bool send(PeerID peer, const NetFrame& frame) { return false; }
-
-    /** Connected, authenticated members of the current lobby (not pending connections). */
-    virtual unsigned int getConnectedPeerCount() const { return 0; }
-    virtual PeerID getConnectedPeer(unsigned int index) const { return 0; }
+    /** Connected, authenticated remote session participants (excluding the local instance). */
+    virtual unsigned int getConnectedPlayerCount() const { return 0; }
+    virtual PlayerID getConnectedPlayer(unsigned int index) const { return PlayerID(); }
 
 protected:
     MultiplayerSession& mutableSession() { return session_; }
 
-    /** Notify the client after the public session state has been updated. */
-    void dispatchSessionStateChanged(MultiplayerSessionState previous)
-    {
-        const auto current = session_.getState();
-        if (previous != current && sessionStateCallback_)
-            sessionStateCallback_(sessionStateContext_, previous, current);
-    }
+    /** Notify applications after the public session state has been updated. */
+    void dispatchSessionStateChanged(MultiplayerSessionState previous);
+
+    /** Notify applications after the public session registry has been updated. */
+    void dispatchSessionUpdated();
+
+    /** Notify applications when an existing participant changes transport connectivity. */
+    void dispatchPlayerConnectionStateChanged(PlayerID playerID, MultiplayerConnectionState previous,
+                                              MultiplayerConnectionState current);
+
+    /** Notify applications after an active session has ended. */
+    void dispatchSessionEnded(uint64_t sessionID, MultiplayerSessionEndReason reason);
+
+    /** Notify applications when an accepted asynchronous lobby operation finishes. */
+    void dispatchOperationCompleted(MultiplayerOperation operation, bool succeeded);
 
     /** Providers call this only after authenticating the sender and decoding the frame. */
-    void dispatchNetFrame(PeerID sender, const NetFrame& frame)
-    {
-        if (netFrameCallback_)
-            netFrameCallback_(netFrameContext_, sender, frame);
-    }
+    void dispatchNetFrame(PlayerID sender, const NetFrame& frame);
 
 private:
     MultiplayerSession session_;
-    SessionStateCallback sessionStateCallback_ = nullptr;
-    void* sessionStateContext_ = nullptr;
-    NetFrameCallback netFrameCallback_ = nullptr;
-    void* netFrameContext_ = nullptr;
 };
 
 /** The single selected external gaming connection; capabilities share its lifetime. */
@@ -142,6 +132,6 @@ CARBON_API MultiplayerInterface& multiplayer();
 }
 
 // The client chooses an implementation at startup; without an override Null is selected.
-// Example: CARBON_USE_CONNECTION_PLATFORM(Steam) (once Steam support is implemented).
+// Example: CARBON_USE_CONNECTION_PLATFORM(Steam).
 #define CARBON_USE_CONNECTION_PLATFORM(Name) \
     CARBON_USE_INTERFACE_IMPLEMENTATION(Carbon::ConnectionPlatformInterface, Name##ConnectionPlatform)

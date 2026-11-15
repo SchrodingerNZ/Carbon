@@ -10,6 +10,7 @@
 #include "CarbonEngine/Core/FileSystem/FileSystem.h"
 #include "CarbonEngine/Core/Memory/MemoryStatistics.h"
 #include "CarbonEngine/Globals.h"
+#include "CarbonEngine/Game/MultiplayerEvents.h"
 #include "CarbonEngine/Platform/PlatformEvents.h"
 #include "CarbonEngine/Render/RenderEvents.h"
 
@@ -269,6 +270,25 @@ public:
 
         return true;
     }
+
+    /** Handler for MultiplayerSessionStateChangedEvent. */
+    virtual bool onMultiplayerSessionStateChangedEvent(const MultiplayerSessionStateChangedEvent& e) { return true; }
+
+    /** Handler for MultiplayerSessionUpdatedEvent. */
+    virtual bool onMultiplayerSessionUpdatedEvent(const MultiplayerSessionUpdatedEvent& e) { return true; }
+
+    /** Handler for MultiplayerPlayerConnectionStateChangedEvent. */
+    virtual bool onMultiplayerPlayerConnectionStateChangedEvent(
+        const MultiplayerPlayerConnectionStateChangedEvent& e) { return true; }
+
+    /** Handler for a session ending, including deliberate leave or loss of the original host. */
+    virtual bool onMultiplayerSessionEndedEvent(const MultiplayerSessionEndedEvent& e) { return true; }
+
+    /** Handler for an accepted asynchronous lobby request completing or failing. */
+    virtual bool onMultiplayerOperationCompletedEvent(const MultiplayerOperationCompletedEvent& e) { return true; }
+
+    /** Handler for NetFrameReceivedEvent. */
+    virtual bool onNetFrameReceivedEvent(const NetFrameReceivedEvent& e) { return true; }
 
     /**
      * Handler for MouseButtonDownEvent.

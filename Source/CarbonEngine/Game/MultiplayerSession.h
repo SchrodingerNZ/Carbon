@@ -7,6 +7,7 @@
 #include "CarbonEngine/Core/StringBase.h"
 #include "CarbonEngine/Core/Vector.h"
 #include <cstdint>
+#include <map>
 
 namespace Carbon
 {
@@ -65,6 +66,9 @@ private:
     MultiplayerConnectionState connectionState_ = MultiplayerConnectionState::Disconnected;
 };
 
+/** Ordered, generic game-authored session properties; Carbon assigns no meaning to keys. */
+using MultiplayerSessionMetadata = std::map<String, String>;
+
 /** A read-only-to-games view of one lobby-and-game session and its shared player registry. */
 class MultiplayerSession
 {
@@ -73,6 +77,16 @@ public:
     MultiplayerSessionState getState() const { return state_; }
     PlayerID getHostPlayerID() const { return hostPlayerID_; }
     PlayerID getLocalPlayerID() const { return localPlayerID_; }
+
+    /** Locally accepted published metadata, including values replicated in the host manifest. */
+    const MultiplayerSessionMetadata& getMetadata() const { return metadata_; }
+
+    /** nullptr indicates an absent key (distinct from a present empty value). */
+    const String* getMetadataValue(const String& key) const
+    {
+        const auto found = metadata_.find(key);
+        return found == metadata_.end() ? nullptr : &found->second;
+    }
 
     unsigned int getPlayerCount() const { return players_.size(); }
     const MultiplayerPlayer* getPlayer(unsigned int index) const
@@ -98,6 +112,7 @@ public:
         hostPlayerID_ = PlayerID();
         localPlayerID_ = PlayerID();
         players_.clear();
+        metadata_.clear();
     }
 
     void setIdentity(uint64_t id, MultiplayerSessionState state, PlayerID host, PlayerID local)
@@ -110,12 +125,16 @@ public:
 
     void setPlayers(const Vector<MultiplayerPlayer>& players) { players_ = players; }
 
+    // Providers publish only complete metadata snapshots, never in-progress edits.
+    void setMetadata(const MultiplayerSessionMetadata& metadata) { metadata_ = metadata; }
+
 private:
     uint64_t id_ = 0;
     MultiplayerSessionState state_ = MultiplayerSessionState::None;
     PlayerID hostPlayerID_;
     PlayerID localPlayerID_;
     Vector<MultiplayerPlayer> players_;
+    MultiplayerSessionMetadata metadata_;
 };
 
 }

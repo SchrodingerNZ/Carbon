@@ -61,6 +61,12 @@ Application::Application()
     events().addHandler<KeyDownEvent>(this);
     events().addHandler<KeyUpEvent>(this);
     events().addHandler<LowMemoryWarningEvent>(this);
+    events().addHandler<MultiplayerSessionStateChangedEvent>(this);
+    events().addHandler<MultiplayerSessionUpdatedEvent>(this);
+    events().addHandler<MultiplayerOperationCompletedEvent>(this);
+    events().addHandler<MultiplayerSessionEndedEvent>(this);
+    events().addHandler<MultiplayerPlayerConnectionStateChangedEvent>(this);
+    events().addHandler<NetFrameReceivedEvent>(this);
     events().addHandler<MouseButtonDownEvent>(this);
     events().addHandler<MouseButtonUpEvent>(this);
     events().addHandler<MouseMoveEvent>(this);
@@ -303,6 +309,12 @@ bool Application::processEvent(const Event& e)
     CALL_EVENT_HANDLER(KeyDownEvent)
     CALL_EVENT_HANDLER(KeyUpEvent)
     CALL_EVENT_HANDLER(LowMemoryWarningEvent)
+    CALL_EVENT_HANDLER(MultiplayerSessionStateChangedEvent)
+    CALL_EVENT_HANDLER(MultiplayerSessionUpdatedEvent)
+    CALL_EVENT_HANDLER(MultiplayerOperationCompletedEvent)
+    CALL_EVENT_HANDLER(MultiplayerSessionEndedEvent)
+    CALL_EVENT_HANDLER(MultiplayerPlayerConnectionStateChangedEvent)
+    CALL_EVENT_HANDLER(NetFrameReceivedEvent)
     CALL_EVENT_HANDLER(MouseButtonDownEvent)
     CALL_EVENT_HANDLER(MouseButtonUpEvent)
     CALL_EVENT_HANDLER(MouseMoveEvent)
