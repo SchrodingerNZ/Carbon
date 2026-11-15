@@ -725,6 +725,9 @@
     <ClInclude Include="Core\Parameter.h">
       <Filter>Core</Filter>
     </ClInclude>
+    <ClInclude Include="Game\MultiplayerSession.h">
+      <Filter>Header Files\Game</Filter>
+    </ClInclude>
     <ClInclude Include="Game\NetFrame.h">
       <Filter>Header Files\Game</Filter>
     </ClInclude>

@@ -531,6 +531,7 @@ class CARBON_API MemoryValidator;
 class CARBON_API Mesh;
 class CARBON_API MeshFormatRegistry;
 class CARBON_API MeshManager;
+class CARBON_API MultiplayerInterface;
 class CARBON_API MouseButtonDownEvent;
 class CARBON_API MouseButtonUpEvent;
 class CARBON_API MouseMoveEvent;
@@ -763,6 +764,9 @@ extern CARBON_API MeshManager& meshes();
  */
 /** Returns the global achievement manager. */
 extern CARBON_API AchievementManager& achievements();
+
+/** Returns the active connection platform's multiplayer capability. */
+extern CARBON_API MultiplayerInterface& multiplayer();
 
 extern CARBON_API PhysicsInterface& physics();
 

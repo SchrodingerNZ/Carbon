@@ -8,6 +8,7 @@
 #include "CarbonEngine/Core/InterfaceRegistry.h"
 #include "CarbonEngine/Game/AchievementInterface.h"
 #include "CarbonEngine/Game/NetFrame.h"
+#include "CarbonEngine/Game/MultiplayerSession.h"
 #include <cstdint>
 #include <functional>
 
@@ -47,7 +48,26 @@ public:
     virtual bool isLobbyPending() const { return false; }
     virtual uint64_t getLobbyID() const { return 0; }
 
-    /** Platform-neutral peer identifier. For Steam, this is the authenticated Steam user ID. */
+    /** Session registry. Players and their IDs are identical on every member machine. */
+    const MultiplayerSession& getSession() const { return session_; }
+
+    /** Host locks the player roster and enters Syncing. Gameplay waits for the synchronization barrier. */
+    virtual bool startGame() { return false; }
+
+    /** Report whether this instance has completed game preparation for the locked roster. */
+    virtual bool setReady(bool ready) { return false; }
+
+    /** Called after a session state change; callbacks run on the thread that processes the transition. */
+    using SessionStateCallback = void (*)(void* context, MultiplayerSessionState previous, MultiplayerSessionState current);
+
+    /** Install or clear the callback. The owner must unregister before destruction. */
+    void setSessionStateCallback(SessionStateCallback callback, void* context = nullptr)
+    {
+        sessionStateCallback_ = callback;
+        sessionStateContext_ = context;
+    }
+
+    /** Platform-neutral peer identifier for the legacy transport API (SteamID on Steam). */
     using PeerID = uint64_t;
 
     /** Called on Carbon's update thread after a complete network frame is validated. */
@@ -68,6 +88,16 @@ public:
     virtual PeerID getConnectedPeer(unsigned int index) const { return 0; }
 
 protected:
+    MultiplayerSession& mutableSession() { return session_; }
+
+    /** Notify the client after the public session state has been updated. */
+    void dispatchSessionStateChanged(MultiplayerSessionState previous)
+    {
+        const auto current = session_.getState();
+        if (previous != current && sessionStateCallback_)
+            sessionStateCallback_(sessionStateContext_, previous, current);
+    }
+
     /** Providers call this only after authenticating the sender and decoding the frame. */
     void dispatchNetFrame(PeerID sender, const NetFrame& frame)
     {
@@ -76,6 +106,9 @@ protected:
     }
 
 private:
+    MultiplayerSession session_;
+    SessionStateCallback sessionStateCallback_ = nullptr;
+    void* sessionStateContext_ = nullptr;
     NetFrameCallback netFrameCallback_ = nullptr;
     void* netFrameContext_ = nullptr;
 };
@@ -104,7 +137,7 @@ public:
 CARBON_DECLARE_INTERFACE_REGISTRY(ConnectionPlatformInterface);
 
 /** Retrieve the selected platform's multiplayer capability after engine initialization. */
-CARBON_API MultiplayerInterface& connectionMultiplayer();
+CARBON_API MultiplayerInterface& multiplayer();
 
 }
 

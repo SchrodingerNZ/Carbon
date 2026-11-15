@@ -889,6 +889,7 @@
     <ClInclude Include="Core\Parameter.h" />
     <ClInclude Include="Core\ParameterArray.h" />
     <ClInclude Include="Game\NetFrame.h" />
+    <ClInclude Include="Game\MultiplayerSession.h" />
     <ClInclude Include="Core\Runnable.h" />
     <ClInclude Include="Core\SettingsManager.h" />
     <ClInclude Include="Core\SharedLibrary.h" />

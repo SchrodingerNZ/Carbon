@@ -52,6 +52,7 @@
 #include "CarbonEngine/Exporters/ProgressDialog.h"
 #include "CarbonEngine/Game/Achievements.h"
 #include "CarbonEngine/Game/NetFrame.h"
+#include "CarbonEngine/Game/MultiplayerSession.h"
 #include "CarbonEngine/Game/ConnectionPlatformInterface.h"
 #include "CarbonEngine/Game/GameCenter.h"
 #include "CarbonEngine/Game/InAppPurchase.h"

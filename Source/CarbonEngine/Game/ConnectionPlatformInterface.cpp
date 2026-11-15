@@ -7,11 +7,16 @@
 #include "CarbonEngine/Core/SharedLibrary.h"
 #include "CarbonEngine/Game/ConnectionPlatformInterface.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <map>
+#include <set>
+#include <string>
+#include <cstdlib>
+#include <vector>
 
 namespace Carbon
 {
@@ -24,7 +29,7 @@ bool ConnectionPlatformInterface::processEvent(const Event& e)
     return true;
 }
 
-MultiplayerInterface& connectionMultiplayer()
+MultiplayerInterface& multiplayer()
 {
     return InterfaceRegistry<ConnectionPlatformInterface>::getActiveInstance()->getMultiplayer();
 }
@@ -372,6 +377,14 @@ public:
     using GetLobbyOwnerFunction = uint64_t (__cdecl *)(void*, uint64_t);
     using GetLobbyMemberCountFunction = int (__cdecl *)(void*, uint64_t);
     using GetLobbyMemberFunction = uint64_t (__cdecl *)(void*, uint64_t, int);
+    using SetLobbyJoinableFunction = bool (__cdecl *)(void*, uint64_t, bool);
+    using SendLobbyChatFunction = bool (__cdecl *)(void*, uint64_t, const void*, int);
+    using GetLobbyChatFunction = int (__cdecl *)(void*, uint64_t, int, uint64_t*, void*, int, int*);
+    using GetSteamUserFunction = void* (__cdecl *)();
+    using GetSteamIDFunction = uint64_t (__cdecl *)(void*);
+    using GetFriendsFunction = void* (__cdecl *)();
+    using GetPersonaNameFunction = const char* (__cdecl *)(void*);
+    using GetFriendPersonaNameFunction = const char* (__cdecl *)(void*, uint64_t);
 
     // SteamNetworkingIdentity: 32-bit type + 32-bit size + 128 bytes of identity data.
     // SteamID identities have type 16 and place the 64-bit user ID at byte offset 8.
@@ -428,6 +441,24 @@ public:
         getLobbyOwner_ = library.mapFunction<GetLobbyOwnerFunction>("SteamAPI_ISteamMatchmaking_GetLobbyOwner");
         getLobbyMemberCount_ = library.mapFunction<GetLobbyMemberCountFunction>("SteamAPI_ISteamMatchmaking_GetNumLobbyMembers");
         getLobbyMember_ = library.mapFunction<GetLobbyMemberFunction>("SteamAPI_ISteamMatchmaking_GetLobbyMemberByIndex");
+        setLobbyJoinable_ = library.mapFunction<SetLobbyJoinableFunction>("SteamAPI_ISteamMatchmaking_SetLobbyJoinable");
+        sendLobbyChat_ = library.mapFunction<SendLobbyChatFunction>("SteamAPI_ISteamMatchmaking_SendLobbyChatMsg");
+        getLobbyChat_ = library.mapFunction<GetLobbyChatFunction>("SteamAPI_ISteamMatchmaking_GetLobbyChatEntry");
+
+        // Carbon's session-player identities are translated from Steam accounts privately.
+        auto getSteamUser = library.mapFunction<GetSteamUserFunction>("SteamAPI_SteamUser_v023");
+        if (!getSteamUser)
+            getSteamUser = library.mapFunction<GetSteamUserFunction>("SteamAPI_SteamUser_v022");
+        getSteamID_ = library.mapFunction<GetSteamIDFunction>("SteamAPI_ISteamUser_GetSteamID");
+        steamUser_ = getSteamUser ? getSteamUser() : nullptr;
+        localSteamID_ = steamUser_ && getSteamID_ ? getSteamID_(steamUser_) : 0;
+
+        auto getFriends = library.mapFunction<GetFriendsFunction>("SteamAPI_SteamFriends_v017");
+        if (!getFriends)
+            getFriends = library.mapFunction<GetFriendsFunction>("SteamAPI_SteamFriends_v018");
+        getPersonaName_ = library.mapFunction<GetPersonaNameFunction>("SteamAPI_ISteamFriends_GetPersonaName");
+        getFriendPersonaName_ = library.mapFunction<GetFriendPersonaNameFunction>("SteamAPI_ISteamFriends_GetFriendPersonaName");
+        steamFriends_ = getFriends ? getFriends() : nullptr;
 
         // Steam Networking Sockets are resolved dynamically like the matchmaking API.
         auto getSockets = library.mapFunction<GetSocketsFunction>("SteamAPI_SteamNetworkingSockets_SteamAPI_v012");
@@ -452,7 +483,8 @@ public:
         matchmaking_ = getMatchmaking ? getMatchmaking() : nullptr;
 
         available_ = matchmaking_ && addFilter_ && requestList_ && getLobbyByIndex_ && createLobby_ &&
-                     joinLobby_ && leaveLobby_ && setLobbyData_ && getLobbyData_ && getCallResult_;
+                     joinLobby_ && leaveLobby_ && setLobbyData_ && getLobbyData_ && getCallResult_ &&
+                     sendLobbyChat_ && getLobbyChat_;
 
         if (available_)
             LOG_INFO << "Steam multiplayer: lobby discovery/hosting/joining available";
@@ -461,9 +493,11 @@ public:
 
         if (!socketsAvailable_)
             LOG_WARNING_WITHOUT_CALLER << "Steam multiplayer: Networking Sockets exports unavailable";
+        if (!localSteamID_)
+            LOG_WARNING_WITHOUT_CALLER << "Steam multiplayer: local Steam identity unavailable for session registry";
     }
 
-    ~SteamMultiplayer() override { leaveLobby(); }
+    ~SteamMultiplayer() override = default;
 
     bool isAvailable() const override { return available_; }
     bool isSearching() const override { return searching_; }
@@ -472,6 +506,418 @@ public:
     bool isInLobby() const override { return lobbyID_ != 0; }
     bool isLobbyPending() const override { return pendingLobbyCall_ != 0 || pendingRole_ != Role::None; }
     uint64_t getLobbyID() const override { return lobbyID_; }
+
+    // Convert arbitrary player-name bytes to a delimiter-safe, canonical form.
+    static std::string encodeManifestName(const std::string& name)
+    {
+        static const char digits[] = "0123456789ABCDEF";
+        std::string result;
+        for (const auto character : name)
+        {
+            const auto value = static_cast<unsigned char>(character);
+            result += digits[value >> 4];
+            result += digits[value & 15];
+        }
+        return result;
+    }
+
+    std::string getManifestPlayerName(uint64_t steamID) const
+    {
+        const auto key = std::string("carbon_player_name_") + std::to_string(steamID);
+        const auto value = getLobbyData_(matchmaking_, lobbyID_, key.c_str());
+        return value && *value ? value : "Steam Player";
+    }
+
+    // The manifest is ordered by Carbon PlayerID, independent of Steam lobby order.
+    // Each entry records the Carbon ID, the provider identity and the display name.
+    std::string buildManifest(const std::map<uint32_t, uint64_t>& members) const
+    {
+        std::string result;
+        for (const auto& member : members)
+        {
+            if (!result.empty())
+                result += ";";
+
+            result += std::to_string(member.first) + ":" + std::to_string(member.second) + ":" +
+                      encodeManifestName(getManifestPlayerName(member.second));
+        }
+        return result;
+    }
+
+    // Announcements are advisory; lobby metadata is always the authoritative source.
+    bool announceManifestRevision(uint64_t revision)
+    {
+        const auto message = std::string("CARBON_MANIFEST_UPDATED|") + std::to_string(revision);
+        return sendLobbyChat_ && sendLobbyChat_(matchmaking_, lobbyID_, message.data(), int(message.size()));
+    }
+
+    void publishManifest()
+    {
+        if (!lobbyID_ || sessionState_ != MultiplayerSessionState::Lobby ||
+            getLobbyOwner_(matchmaking_, lobbyID_) != localSteamID_)
+            return;
+
+        // Wait for Carbon's existing host-assigned registry to be complete.
+        const auto count = getLobbyMemberCount_(matchmaking_, lobbyID_);
+        std::map<uint32_t, uint64_t> members;
+        for (int index = 0; index < count; ++index)
+        {
+            const auto steamID = getLobbyMember_(matchmaking_, lobbyID_, index);
+            const auto found = localPlayerIDs_.find(steamID);
+            if (found == localPlayerIDs_.end())
+                return;
+            members[found->second] = steamID;
+        }
+        if (int(members.size()) != count)
+            return;
+
+        const auto manifest = buildManifest(members);
+        if (manifest.size() + 64 > 4096)
+        {
+            LOG_WARNING_WITHOUT_CALLER << "Steam multiplayer: player manifest exceeds lobby-message limit";
+            return;
+        }
+        if (manifest == publishedManifest_)
+            return;
+
+        // Publish the whole representation before publishing its revision marker.
+        // Failed writes do not advance Carbon's committed revision.
+        const auto nextRevision = manifestRevision_ + 1;
+        if (!setLobbyData_(matchmaking_, lobbyID_, "carbon_manifest", manifest.c_str()) ||
+            !setLobbyData_(matchmaking_, lobbyID_, "carbon_manifest_revision", std::to_string(nextRevision).c_str()))
+        {
+            LOG_WARNING_WITHOUT_CALLER << "Steam multiplayer: failed to publish player manifest";
+            return;
+        }
+
+        manifestRevision_ = nextRevision;
+        publishedManifest_ = manifest;
+        confirmedMembers_.clear();
+        confirmedMembers_.insert(localSteamID_);
+        announceManifestRevision(manifestRevision_);
+        LOG_INFO << "Steam multiplayer: ManifestUpdated revision " << manifestRevision_
+                 << ", members=" << members.size();
+    }
+
+    // Clients confirm their locally reconstructed registry, not a blind copy of metadata.
+    void confirmManifest()
+    {
+        if (!lobbyID_ || (sessionState_ != MultiplayerSessionState::Lobby &&
+                          sessionState_ != MultiplayerSessionState::Syncing))
+            return;
+
+        const auto host = getLobbyOwner_(matchmaking_, lobbyID_);
+        if (host == localSteamID_)
+            return;
+
+        const auto rawRevision = getLobbyData_(matchmaking_, lobbyID_, "carbon_manifest_revision");
+        const auto rawManifest = getLobbyData_(matchmaking_, lobbyID_, "carbon_manifest");
+        if (!rawRevision || !*rawRevision || !rawManifest || !*rawManifest)
+            return;
+
+        char* end = nullptr;
+        const auto revision = std::strtoull(rawRevision, &end, 10);
+        if (!revision || !end || *end)
+            return;
+
+        // Match the metadata against our locally built Carbon registry.
+        const auto& session = getSession();
+        if (!session.getLocalPlayerID().isValid() || !session.getHostPlayerID().isValid() ||
+            session.getPlayerCount() == 0)
+            return;
+
+        std::map<uint32_t, uint64_t> members;
+        for (const auto& entry : steamByPlayerID_)
+            members[entry.first] = entry.second;
+        if (members.size() != session.getPlayerCount())
+            return;
+
+        for (const auto& member : members)
+        {
+            const auto player = session.getPlayer(PlayerID(member.first));
+            if (!player || player->getName() != String(getManifestPlayerName(member.second).c_str()))
+                return;
+        }
+
+        const auto localManifest = buildManifest(members);
+        // A complete but divergent registry is sent too, so the host can report the mismatch.
+        // Incomplete identity data waits for the next metadata update.
+        if (localManifest != rawManifest)
+            LOG_WARNING_WITHOUT_CALLER << "Steam multiplayer: locally reconstructed manifest differs from host revision " << revision;
+
+        // Re-send if the revision changed or the synchronization phase was entered.
+        if (confirmedRevision_ == revision && confirmedPhase_ == sessionState_)
+            return;
+
+        const auto phase = sessionState_ == MultiplayerSessionState::Syncing ? "S" : "L";
+        const auto message = std::string("CARBON_MANIFEST_CONFIRM|") + phase + "|" +
+                             std::to_string(revision) + "|" + localManifest;
+        if (sendLobbyChat_ && sendLobbyChat_(matchmaking_, lobbyID_, message.data(), int(message.size())))
+        {
+            confirmedRevision_ = revision;
+            confirmedPhase_ = sessionState_;
+            LOG_INFO << "Steam multiplayer: ManifestConfirm sent for revision " << revision;
+        }
+    }
+
+    // Only the host can finish synchronization; confirmation and readiness are independent.
+    void beginPlayingIfReady()
+    {
+        if (sessionState_ != MultiplayerSessionState::Syncing || !lobbyID_ ||
+            getLobbyOwner_(matchmaking_, lobbyID_) != localSteamID_ || frozenSteamMembers_.empty())
+            return;
+
+        for (const auto steamID : frozenSteamMembers_)
+        {
+            if (confirmedMembers_.count(steamID) == 0 || readyMembers_.count(steamID) == 0)
+                return;
+        }
+
+        // Publish the final phase before notifying other participants.
+        if (!setLobbyData_(matchmaking_, lobbyID_, "carbon_session_phase", "playing"))
+        {
+            LOG_WARNING_WITHOUT_CALLER << "Steam multiplayer: failed to publish Playing phase";
+            return;
+        }
+
+        const auto previousState = mutableSession().getState();
+        sessionState_ = MultiplayerSessionState::Playing;
+        mutableSession().setIdentity(lobbyID_, sessionState_, mutableSession().getHostPlayerID(),
+                                     mutableSession().getLocalPlayerID());
+        dispatchSessionStateChanged(previousState);
+
+        const auto message = std::string("CARBON_BEGIN_PLAYING|") + std::to_string(manifestRevision_);
+        if (sendLobbyChat_)
+            sendLobbyChat_(matchmaking_, lobbyID_, message.data(), int(message.size()));
+
+        LOG_INFO << "Steam multiplayer: all manifest confirmations and game readiness received; Playing";
+    }
+
+    // A game can report readiness from the Syncing state callback, before metadata has settled.
+    // Defer the outgoing message until our locked-manifest confirmation has been submitted.
+    void sendPendingReadiness()
+    {
+        if (sessionState_ != MultiplayerSessionState::Syncing || localReadyRequested_ < 0 ||
+            getLobbyOwner_(matchmaking_, lobbyID_) == localSteamID_ ||
+            confirmedPhase_ != MultiplayerSessionState::Syncing || !confirmedRevision_ ||
+            (localReadySentRevision_ == confirmedRevision_ && localReadySentValue_ == localReadyRequested_))
+            return;
+
+        const auto rawRevision = getLobbyData_(matchmaking_, lobbyID_, "carbon_manifest_revision");
+        if (!rawRevision || !*rawRevision)
+            return;
+
+        char* end = nullptr;
+        const auto revision = std::strtoull(rawRevision, &end, 10);
+        if (!revision || !end || *end || revision != confirmedRevision_)
+            return;
+
+        const auto message = std::string("CARBON_PLAYER_READY|") + std::to_string(revision) +
+                             "|" + (localReadyRequested_ ? "1" : "0");
+        if (sendLobbyChat_ && sendLobbyChat_(matchmaking_, lobbyID_, message.data(), int(message.size())))
+        {
+            localReadySentRevision_ = revision;
+            localReadySentValue_ = localReadyRequested_;
+            LOG_INFO << "Steam multiplayer: PlayerReady " << localReadyRequested_ << " sent for revision " << revision;
+        }
+    }
+
+    bool setReady(bool ready) override
+    {
+        if (!lobbyID_ || sessionState_ != MultiplayerSessionState::Syncing ||
+            !getSession().getLocalPlayerID().isValid())
+            return false;
+
+        // The host's own readiness is tracked by the same barrier as remote clients.
+        if (getLobbyOwner_(matchmaking_, lobbyID_) == localSteamID_)
+        {
+            if (ready)
+                readyMembers_.insert(localSteamID_);
+            else
+                readyMembers_.erase(localSteamID_);
+            beginPlayingIfReady();
+            return true;
+        }
+
+        localReadyRequested_ = ready ? 1 : 0;
+        sendPendingReadiness();
+        return true;
+    }
+
+    // Steam supplies the authenticated sender separately from untrusted message bytes.
+    void onLobbyChat(const unsigned char* data, int size)
+    {
+        if (!lobbyID_ || !data || size < 20 || !getLobbyChat_)
+            return;
+
+        uint64_t lobby = 0;
+        int chatID = 0;
+        memcpy(&lobby, data, sizeof(lobby));
+        memcpy(&chatID, data + 16, sizeof(chatID));
+        if (lobby != lobbyID_)
+            return;
+
+        char buffer[8192] = {};
+        uint64_t sender = 0;
+        int entryType = 0;
+        const auto length = getLobbyChat_(matchmaking_, lobbyID_, chatID, &sender, buffer, sizeof(buffer), &entryType);
+        if (length <= 0 || length > int(sizeof(buffer)) || !isLobbyMember(sender))
+            return;
+
+        const std::string message(buffer, buffer + length);
+
+        // A host announcement signals an updated metadata snapshot. The regular update
+        // will reconstruct it and send an explicit confirmation when it is complete.
+        const std::string updatedPrefix = "CARBON_MANIFEST_UPDATED|";
+        if (message.compare(0, updatedPrefix.size(), updatedPrefix) == 0)
+        {
+            if (sender == getLobbyOwner_(matchmaking_, lobbyID_))
+                LOG_INFO << "Steam multiplayer: ManifestUpdated received from host";
+            return;
+        }
+
+        // A readiness message is valid only from a locked member for the active revision.
+        const std::string readyPrefix = "CARBON_PLAYER_READY|";
+        if (message.compare(0, readyPrefix.size(), readyPrefix) == 0)
+        {
+            if (sessionState_ != MultiplayerSessionState::Syncing ||
+                getLobbyOwner_(matchmaking_, lobbyID_) != localSteamID_ ||
+                std::find(frozenSteamMembers_.begin(), frozenSteamMembers_.end(), sender) == frozenSteamMembers_.end())
+                return;
+
+            const auto separator = message.find('|', readyPrefix.size());
+            if (separator == std::string::npos)
+                return;
+
+            const auto number = message.substr(readyPrefix.size(), separator - readyPrefix.size());
+            char* end = nullptr;
+            const auto revision = std::strtoull(number.c_str(), &end, 10);
+            if (!revision || !end || *end || revision != manifestRevision_)
+                return;
+
+            const auto value = message.substr(separator + 1);
+            if (value == "1")
+                readyMembers_.insert(sender);
+            else if (value == "0")
+                readyMembers_.erase(sender);
+            else
+                return;
+
+            LOG_INFO << "Steam multiplayer: PlayerReady " << value.c_str() << " from " << sender;
+            beginPlayingIfReady();
+            return;
+        }
+
+        // Guests use the metadata phase as authoritative; this is only a prompt to update.
+        const std::string beginPrefix = "CARBON_BEGIN_PLAYING|";
+        if (message.compare(0, beginPrefix.size(), beginPrefix) == 0)
+        {
+            if (sender == getLobbyOwner_(matchmaking_, lobbyID_))
+                LOG_INFO << "Steam multiplayer: BeginPlaying received from host";
+            return;
+        }
+
+        const std::string prefix = "CARBON_MANIFEST_CONFIRM|";
+        if (message.compare(0, prefix.size(), prefix) != 0 ||
+            (sessionState_ != MultiplayerSessionState::Lobby && sessionState_ != MultiplayerSessionState::Syncing) ||
+            getLobbyOwner_(matchmaking_, lobbyID_) != localSteamID_)
+            return;
+
+        const auto phaseSeparator = message.find('|', prefix.size());
+        if (phaseSeparator == std::string::npos)
+            return;
+
+        const auto expectedPhase = sessionState_ == MultiplayerSessionState::Syncing ? "S" : "L";
+        if (message.substr(prefix.size(), phaseSeparator - prefix.size()) != expectedPhase)
+            return;
+
+        const auto separator = message.find('|', phaseSeparator + 1);
+        if (separator == std::string::npos)
+            return;
+
+        const auto number = message.substr(phaseSeparator + 1, separator - phaseSeparator - 1);
+        char* end = nullptr;
+        const auto revision = std::strtoull(number.c_str(), &end, 10);
+        if (!revision || !end || *end || revision != manifestRevision_)
+            return;
+
+        // Only members of the host's committed roster may confirm it.
+        if (message.substr(separator + 1) != publishedManifest_ ||
+            localPlayerIDs_.find(sender) == localPlayerIDs_.end() ||
+            (sessionState_ == MultiplayerSessionState::Syncing &&
+             std::find(frozenSteamMembers_.begin(), frozenSteamMembers_.end(), sender) == frozenSteamMembers_.end()))
+        {
+            LOG_WARNING_WITHOUT_CALLER << "Steam multiplayer: invalid ManifestConfirm from member " << sender;
+            return;
+        }
+
+        if (confirmedMembers_.insert(sender).second)
+        {
+            LOG_INFO << "Steam multiplayer: ManifestConfirm accepted from " << sender
+                     << " for revision " << revision;
+            if (sessionState_ == MultiplayerSessionState::Syncing &&
+                confirmedMembers_.size() == frozenSteamMembers_.size())
+                LOG_INFO << "Steam multiplayer: all locked members confirmed manifest revision " << revision;
+            beginPlayingIfReady();
+        }
+    }
+
+    bool startGame() override
+    {
+        // Only the host can freeze the roster; wait until all lobby members have IDs.
+        if (!lobbyID_ || !localSteamID_ || !getLobbyOwner_ || !getLobbyMemberCount_ || !getLobbyMember_ ||
+            getLobbyOwner_(matchmaking_, lobbyID_) != localSteamID_ ||
+            sessionState_ != MultiplayerSessionState::Lobby ||
+            mutableSession().getPlayerCount() != unsigned(getLobbyMemberCount_(matchmaking_, lobbyID_)))
+            return false;
+
+        // Record every participant before publishing the game phase. Order is by PlayerID.
+        std::map<uint32_t, uint64_t> ordered;
+        const auto count = getLobbyMemberCount_(matchmaking_, lobbyID_);
+        for (int index = 0; index < count; ++index)
+        {
+            const auto steamID = getLobbyMember_(matchmaking_, lobbyID_, index);
+            const auto found = localPlayerIDs_.find(steamID);
+            if (found != localPlayerIDs_.end())
+                ordered[found->second] = steamID;
+        }
+
+        std::string publishedRoster;
+        for (const auto& player : ordered)
+        {
+            if (!publishedRoster.empty())
+                publishedRoster += ",";
+            publishedRoster += std::to_string(player.second);
+        }
+
+        // Lock only a fully published manifest; game preparation is a separate barrier.
+        publishManifest();
+        if (!manifestRevision_)
+            return false;
+
+        if (!setLobbyData_(matchmaking_, lobbyID_, "carbon_session_roster", publishedRoster.c_str()) ||
+            !setLobbyData_(matchmaking_, lobbyID_, "carbon_session_phase", "syncing"))
+            return false;
+
+        frozenSteamMembers_.clear();
+        for (const auto& player : ordered)
+            frozenSteamMembers_.push_back(player.second);
+
+        if (setLobbyJoinable_ && !setLobbyJoinable_(matchmaking_, lobbyID_, false))
+            LOG_WARNING_WITHOUT_CALLER << "Steam multiplayer: unable to close the lobby to new members";
+
+        sessionState_ = MultiplayerSessionState::Syncing;
+        confirmedMembers_.clear();
+        confirmedMembers_.insert(localSteamID_);
+        readyMembers_.clear();
+        localReadyRequested_ = -1;
+        localReadySentRevision_ = 0;
+        localReadySentValue_ = -1;
+        updateSessionRegistry();
+        announceManifestRevision(manifestRevision_);
+        LOG_INFO << "Steam multiplayer: session player roster locked for synchronization";
+        return true;
+    }
 
     unsigned int getConnectedPeerCount() const override
     {
@@ -515,6 +961,195 @@ public:
                                        << ", Steam result " << status;
 
         return status == 1;
+    }
+
+    /** Reconcile Steam membership with Carbon's shared, host-assigned player registry. */
+    void updateSessionRegistry()
+    {
+        if (!lobbyID_ || !localSteamID_ || !getLobbyOwner_ || !getLobbyMemberCount_ || !getLobbyMember_)
+            return;
+
+        const auto hostSteamID = getLobbyOwner_(matchmaking_, lobbyID_);
+        const bool isHost = pendingEntryWasHost_ && hostSteamID == localSteamID_;
+        const auto memberCount = getLobbyMemberCount_(matchmaking_, lobbyID_);
+        if (!hostSteamID || memberCount < 1)
+            return;
+
+        // Once the roster is locked, the published snapshot supersedes live lobby membership.
+        const auto phase = getLobbyData_(matchmaking_, lobbyID_, "carbon_session_phase");
+        if (phase && (String(phase) == "syncing" || String(phase) == "playing"))
+        {
+            if (frozenSteamMembers_.empty())
+            {
+                const auto rosterData = getLobbyData_(matchmaking_, lobbyID_, "carbon_session_roster");
+                if (!rosterData || !*rosterData)
+                    return;
+
+                // Reject incomplete or malformed snapshots rather than creating divergent IDs.
+                const std::string encoded(rosterData);
+                size_t start = 0;
+                std::vector<uint64_t> parsed;
+                while (start < encoded.size())
+                {
+                    const auto end = encoded.find(',', start);
+                    const auto item = encoded.substr(start, end == std::string::npos ? end : end - start);
+                    char* tail = nullptr;
+                    const auto number = std::strtoull(item.c_str(), &tail, 10);
+                    if (!number || !tail || *tail)
+                        return;
+                    parsed.push_back(uint64_t(number));
+                    if (end == std::string::npos)
+                        break;
+                    start = end + 1;
+                }
+                if (parsed.empty() || parsed.front() != hostSteamID)
+                    return;
+                frozenSteamMembers_ = parsed;
+            }
+
+            // The host controls the transition to Playing after the two-part barrier.
+            // Guests validate their locked manifest before accepting that phase.
+            if (String(phase) == "playing")
+            {
+                const auto rawRevision = getLobbyData_(matchmaking_, lobbyID_, "carbon_manifest_revision");
+                char* end = nullptr;
+                const auto revision = rawRevision ? std::strtoull(rawRevision, &end, 10) : 0;
+                if (getLobbyOwner_(matchmaking_, lobbyID_) == localSteamID_ ||
+                    (revision && end && !*end && confirmedRevision_ == revision &&
+                     confirmedPhase_ == MultiplayerSessionState::Syncing))
+                    sessionState_ = MultiplayerSessionState::Playing;
+            }
+            else if (sessionState_ != MultiplayerSessionState::Playing)
+                sessionState_ = MultiplayerSessionState::Syncing;
+        }
+
+        // Assign IDs only on the host, in join order. PlayerID 1 always belongs to the host.
+        if (isHost && localPlayerIDs_.empty() && sessionState_ == MultiplayerSessionState::Lobby)
+        {
+            localPlayerIDs_[hostSteamID] = nextPlayerID_++;
+        }
+
+        std::map<uint32_t, MultiplayerPlayer> orderedRoster;
+        std::map<uint32_t, uint64_t> destinations;
+        PlayerID localID;
+        PlayerID hostID;
+
+        const int registryCount = (sessionState_ == MultiplayerSessionState::Syncing ||
+                                   sessionState_ == MultiplayerSessionState::Playing)
+                                      ? int(frozenSteamMembers_.size()) : memberCount;
+        for (int index = 0; index < registryCount; ++index)
+        {
+            const auto steamID = (sessionState_ == MultiplayerSessionState::Syncing ||
+                                  sessionState_ == MultiplayerSessionState::Playing)
+                                     ? frozenSteamMembers_[index]
+                                     : getLobbyMember_(matchmaking_, lobbyID_, index);
+            if (!steamID)
+                continue;
+
+            const auto idKey = std::string("carbon_player_id_") + std::to_string(steamID);
+            const auto nameKey = std::string("carbon_player_name_") + std::to_string(steamID);
+
+            if (isHost && sessionState_ == MultiplayerSessionState::Lobby)
+            {
+                auto found = localPlayerIDs_.find(steamID);
+                if (found == localPlayerIDs_.end())
+                {
+                    const auto newID = nextPlayerID_++;
+                    found = localPlayerIDs_.insert({steamID, newID}).first;
+                    LOG_INFO << "Steam multiplayer: assigned Carbon PlayerID " << newID << " to Steam member " << steamID;
+                }
+
+                // Publish the shared ID and display name through the owner-managed lobby data.
+                const auto published = std::to_string(found->second);
+                const auto previousID = getLobbyData_(matchmaking_, lobbyID_, idKey.c_str());
+                if (!previousID || published != previousID)
+                    setLobbyData_(matchmaking_, lobbyID_, idKey.c_str(), published.c_str());
+
+                const auto name = getSteamPlayerName(steamID);
+                const auto previousName = getLobbyData_(matchmaking_, lobbyID_, nameKey.c_str());
+                if (!previousName || name != previousName)
+                    setLobbyData_(matchmaking_, lobbyID_, nameKey.c_str(), name.c_str());
+            }
+
+            // All clients read the owner's published mapping, never independently number members.
+            const auto rawID = getLobbyData_(matchmaking_, lobbyID_, idKey.c_str());
+            if (!rawID || !*rawID)
+                continue;
+
+            char* tail = nullptr;
+            const auto number = std::strtoul(rawID, &tail, 10);
+            if (!tail || *tail || !number || number > UINT32_MAX)
+                continue;
+
+            const PlayerID playerID{uint32_t(number)};
+            const auto rawName = getLobbyData_(matchmaking_, lobbyID_, nameKey.c_str());
+            const auto name = rawName && *rawName ? String(rawName) : String("Steam Player");
+
+            MultiplayerConnectionState connection = MultiplayerConnectionState::Disconnected;
+            if (steamID == localSteamID_)
+                connection = MultiplayerConnectionState::Connected;
+            else
+            {
+                const auto peer = peers_.find(steamID);
+                if (peer != peers_.end())
+                    connection = peer->second.connected ? MultiplayerConnectionState::Connected
+                                                         : MultiplayerConnectionState::Connecting;
+            }
+
+            // Keep iteration order identical everywhere and reject duplicate published IDs.
+            if (destinations.find(playerID.getValue()) != destinations.end())
+                continue;
+            orderedRoster.insert({playerID.getValue(), MultiplayerPlayer(playerID, name, connection)});
+            destinations[playerID.getValue()] = steamID;
+
+            if (steamID == localSteamID_)
+                localID = playerID;
+            if (steamID == hostSteamID)
+                hostID = playerID;
+        }
+
+        Vector<MultiplayerPlayer> roster;
+        for (const auto& entry : orderedRoster)
+            roster.append(entry.second);
+        steamByPlayerID_ = destinations;
+
+        auto& session = mutableSession();
+
+        // Log only registry changes, not every per-frame Steam membership poll.
+        bool rosterChanged = session.getPlayerCount() != roster.size();
+        if (!rosterChanged)
+        {
+            for (unsigned int index = 0; index < roster.size(); ++index)
+            {
+                const auto existing = session.getPlayer(index);
+                if (!existing || existing->getID() != roster[index].getID() ||
+                    existing->getName() != roster[index].getName())
+                {
+                    rosterChanged = true;
+                    break;
+                }
+            }
+        }
+
+        const auto previousState = session.getState();
+        session.setIdentity(lobbyID_, sessionState_, hostID, localID);
+        session.setPlayers(roster);
+        dispatchSessionStateChanged(previousState);
+
+        // Publish roster updates after the host's identity mapping has settled.
+        publishManifest();
+        confirmManifest();
+        sendPendingReadiness();
+        beginPlayingIfReady();
+
+        if (rosterChanged)
+        {
+            LOG_INFO << "Carbon multiplayer: session " << lobbyID_ << " registry has " << roster.size()
+                     << " players (local=" << localID.getValue() << ", host=" << hostID.getValue() << ")";
+            for (const auto& player : roster)
+                LOG_INFO << "Carbon multiplayer: PlayerID=" << player.getID().getValue()
+                         << " name=" << player.getName();
+        }
     }
 
     // Called from the connection platform's existing main-thread manual callback loop.
@@ -753,6 +1388,33 @@ public:
 
         lobbyID_ = 0;
         networkVersion_ = String();
+        localPlayerIDs_.clear();
+        steamByPlayerID_.clear();
+        frozenSteamMembers_.clear();
+        publishedManifest_.clear();
+        manifestRevision_ = 0;
+        confirmedRevision_ = 0;
+        confirmedMembers_.clear();
+        readyMembers_.clear();
+        localReadyRequested_ = -1;
+        localReadySentRevision_ = 0;
+        localReadySentValue_ = -1;
+        confirmedPhase_ = MultiplayerSessionState::None;
+        nextPlayerID_ = 1;
+        localSteamID_ = steamUser_ && getSteamID_ ? getSteamID_(steamUser_) : 0;
+        // Preserve the completed session's identity and outcome for the application.
+        const auto previousState = mutableSession().getState();
+        const auto previousID = mutableSession().getID();
+        const auto previousHost = mutableSession().getHostPlayerID();
+        const auto previousLocal = mutableSession().getLocalPlayerID();
+        mutableSession().clear();
+
+        sessionState_ = previousState == MultiplayerSessionState::None
+                            ? MultiplayerSessionState::None : MultiplayerSessionState::Ended;
+        if (sessionState_ == MultiplayerSessionState::Ended)
+            mutableSession().setIdentity(previousID, sessionState_, previousHost, previousLocal);
+
+        dispatchSessionStateChanged(previousState);
     }
 
     void onLobbyEntered(const unsigned char* data, int size)
@@ -816,6 +1478,11 @@ public:
         pendingLobbyCall_ = 0;
         pendingRole_ = Role::None;
         requestedLobbyID_ = 0;
+        const auto previousState = mutableSession().getState();
+        sessionState_ = MultiplayerSessionState::Lobby;
+        mutableSession().clear();
+        mutableSession().setIdentity(lobbyID_, sessionState_, PlayerID(), PlayerID());
+        dispatchSessionStateChanged(previousState);
         LOG_INFO << "Steam multiplayer: entered lobby " << lobbyID_ << " (network " << networkVersion_ << ")";
 
         // The host listens; guests initiate their connection to the authoritative lobby owner.
@@ -910,6 +1577,18 @@ public:
 private:
     enum class Role { None, Host, Guest };
 
+    std::string getSteamPlayerName(uint64_t steamID) const
+    {
+        // Friends persona names are presentation data, not authentication identities.
+        const char* name = nullptr;
+        if (steamFriends_ && steamID == localSteamID_ && getPersonaName_)
+            name = getPersonaName_(steamFriends_);
+        else if (steamFriends_ && getFriendPersonaName_)
+            name = getFriendPersonaName_(steamFriends_, steamID);
+
+        return name && *name ? name : "Steam Player";
+    }
+
     bool isLobbyMember(uint64_t peer) const
     {
         if (!lobbyID_ || !peer || !getLobbyMemberCount_ || !getLobbyMember_)
@@ -967,6 +1646,9 @@ private:
     GetLobbyOwnerFunction getLobbyOwner_ = nullptr;
     GetLobbyMemberCountFunction getLobbyMemberCount_ = nullptr;
     GetLobbyMemberFunction getLobbyMember_ = nullptr;
+    SetLobbyJoinableFunction setLobbyJoinable_ = nullptr;
+    SendLobbyChatFunction sendLobbyChat_ = nullptr;
+    GetLobbyChatFunction getLobbyChat_ = nullptr;
     CreateListenSocketFunction createListenSocket_ = nullptr;
     ConnectP2PFunction connectP2P_ = nullptr;
     AcceptConnectionFunction acceptConnection_ = nullptr;
@@ -976,6 +1658,26 @@ private:
     ReceiveMessagesFunction receiveMessages_ = nullptr;
     ReleaseMessageFunction releaseMessage_ = nullptr;
     GetConnectionInfoFunction getConnectionInfo_ = nullptr;
+    void* steamUser_ = nullptr;
+    void* steamFriends_ = nullptr;
+    uint64_t localSteamID_ = 0;
+    GetSteamIDFunction getSteamID_ = nullptr;
+    GetPersonaNameFunction getPersonaName_ = nullptr;
+    GetFriendPersonaNameFunction getFriendPersonaName_ = nullptr;
+    std::map<uint64_t, uint32_t> localPlayerIDs_;
+    std::map<uint32_t, uint64_t> steamByPlayerID_;
+    std::vector<uint64_t> frozenSteamMembers_;
+    uint32_t nextPlayerID_ = 1;
+    uint64_t manifestRevision_ = 0;
+    uint64_t confirmedRevision_ = 0;
+    std::string publishedManifest_;
+    std::set<uint64_t> confirmedMembers_;
+    std::set<uint64_t> readyMembers_;
+    int localReadyRequested_ = -1;
+    uint64_t localReadySentRevision_ = 0;
+    int localReadySentValue_ = -1;
+    MultiplayerSessionState confirmedPhase_ = MultiplayerSessionState::None;
+    MultiplayerSessionState sessionState_ = MultiplayerSessionState::None;
 };
 
 /** Steam lifecycle with manual dispatch so callbacks reach Carbon without Steam SDK linkage. */
@@ -1119,6 +1821,10 @@ public:
             if (callback.callback == 1221 && callback.data)
                 multiplayer_.onConnectionStatus(callback.data, callback.size);
 
+            // LobbyChatMsg_t (507) carries manifest control messages with Steam-authenticated senders.
+            if (callback.callback == 507 && callback.data)
+                multiplayer_.onLobbyChat(callback.data, callback.size);
+
             // LobbyEnter_t (504) is delivered as an ordinary callback as well as a call result.
             if (callback.callback == 504 && callback.data)
                 multiplayer_.onLobbyEntered(callback.data, callback.size);
@@ -1126,6 +1832,7 @@ public:
             freeCallback_(steamPipe_);
         }
 
+        multiplayer_.updateSessionRegistry();
         multiplayer_.updateSockets();
         achievements_.update();
     }
