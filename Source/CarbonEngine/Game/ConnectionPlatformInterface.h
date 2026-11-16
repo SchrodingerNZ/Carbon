@@ -24,6 +24,9 @@ public:
     /** Whether the selected provider supports multiplayer matchmaking. */
     virtual bool isAvailable() const { return false; }
 
+    /** Local platform display name; available independently of lobby/session membership. */
+    virtual String getLocalPlayerName() const { return "Player"; }
+
     /** Start an asynchronous lobby search. False means the request was not submitted; no completion event follows. */
     virtual bool findLobbies(const String& networkVersion) { return false; }
 
@@ -59,6 +62,13 @@ public:
 
     /** Publish all staged metadata as a single manifest revision. False leaves edits staged for retry. */
     virtual bool publishMetadata() { return false; }
+
+    /** Set local platform-specific state; keys and values are forwarded unchanged to the provider.
+        Successfully set keys are cleared when this multiplayer session ends. */
+    virtual bool setPlatformValue(const String& key, const String& value) { return false; }
+
+    /** Clear one previously set local platform value. False indicates unsupported or unsuccessful. */
+    virtual bool clearPlatformValue(const String& key) { return false; }
 
     /** Host freezes the roster and published metadata. Gameplay begins after all participants are ready. */
     virtual bool startGame() { return false; }

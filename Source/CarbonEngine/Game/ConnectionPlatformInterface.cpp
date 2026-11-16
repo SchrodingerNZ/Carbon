@@ -438,6 +438,7 @@ public:
     using GetFriendsFunction = void* (__cdecl *)();
     using GetPersonaNameFunction = const char* (__cdecl *)(void*);
     using GetFriendPersonaNameFunction = const char* (__cdecl *)(void*, uint64_t);
+    using SetRichPresenceFunction = bool (__cdecl *)(void*, const char*, const char*);
 
     // SteamNetworkingIdentity: 32-bit type + 32-bit size + 128 bytes of identity data.
     // SteamID identities have type 16 and place the 64-bit user ID at byte offset 8.
@@ -511,6 +512,7 @@ public:
             getFriends = library.mapFunction<GetFriendsFunction>("SteamAPI_SteamFriends_v018");
         getPersonaName_ = library.mapFunction<GetPersonaNameFunction>("SteamAPI_ISteamFriends_GetPersonaName");
         getFriendPersonaName_ = library.mapFunction<GetFriendPersonaNameFunction>("SteamAPI_ISteamFriends_GetFriendPersonaName");
+        setRichPresence_ = library.mapFunction<SetRichPresenceFunction>("SteamAPI_ISteamFriends_SetRichPresence");
         steamFriends_ = getFriends ? getFriends() : nullptr;
 
         // Steam Networking Sockets are resolved dynamically like the matchmaking API.
@@ -553,6 +555,69 @@ public:
     ~SteamMultiplayer() override = default;
 
     bool isAvailable() const override { return available_; }
+
+    String getLocalPlayerName() const override
+    {
+        // Persona names are display text, independent of the current network session.
+        if (steamFriends_ && getPersonaName_)
+        {
+            const auto name = getPersonaName_(steamFriends_);
+            if (name && *name)
+                return name;
+        }
+
+        return "Player";
+    }
+
+    bool setPlatformValue(const String& key, const String& value) override
+    {
+        // The provider understands the key; Carbon does not translate either string.
+        if (!steamFriends_ || !setRichPresence_ || !key.length())
+            return false;
+
+        const bool accepted = setRichPresence_(steamFriends_, key.cStr(), value.cStr());
+        LOG_INFO << "Steam platform value SET key=" << key << " value=" << value << " accepted=" << accepted;
+        if (!accepted)
+            return false;
+
+        // Remember only successfully applied keys for session teardown.
+        platformValueKeys_.insert(std::string(key.cStr(), key.length()));
+        return true;
+    }
+
+    bool clearPlatformValue(const String& key) override
+    {
+        if (!steamFriends_ || !setRichPresence_ || !key.length())
+            return false;
+
+        // Steam removes this key when its value is null; other keys are untouched.
+        const bool accepted = setRichPresence_(steamFriends_, key.cStr(), nullptr);
+        LOG_INFO << "Steam platform value CLEAR key=" << key << " accepted=" << accepted;
+        if (!accepted)
+            return false;
+
+        platformValueKeys_.erase(std::string(key.cStr(), key.length()));
+        return true;
+    }
+
+    void clearPlatformValues()
+    {
+        // Clear even when leaving a lobby fails or this provider is shutting down.
+        if (steamFriends_ && setRichPresence_)
+        {
+            for (const auto& key : platformValueKeys_)
+            {
+                const bool accepted = setRichPresence_(steamFriends_, key.c_str(), nullptr);
+                LOG_INFO << "Steam platform value SESSION CLEAR key=" << key.c_str() << " accepted=" << accepted
+                         << " lobby=" << lobbyID_;
+                if (!accepted)
+                    LOG_WARNING_WITHOUT_CALLER << "Steam multiplayer: could not clear platform value " << key.c_str();
+            }
+        }
+
+        platformValueKeys_.clear();
+    }
+
     bool isSearching() const override { return searching_; }
     bool hasSearchResults() const override { return completed_; }
     unsigned int getLobbyCount() const override { return lobbyCount_; }
@@ -1895,6 +1960,10 @@ public:
     /** Close a session without converting transport disconnects into termination. */
     void endSession(MultiplayerSessionEndReason reason, bool notify = true)
     {
+        // Platform values belong to the ending session, not the next lobby or game.
+        // Do this before notifying applications so they can set new values safely.
+        clearPlatformValues();
+
         // Invalidate all work resumed after application event dispatch.
         ++sessionGeneration_;
 
@@ -2248,6 +2317,8 @@ private:
     GetSteamIDFunction getSteamID_ = nullptr;
     GetPersonaNameFunction getPersonaName_ = nullptr;
     GetFriendPersonaNameFunction getFriendPersonaName_ = nullptr;
+    SetRichPresenceFunction setRichPresence_ = nullptr;
+    std::set<std::string> platformValueKeys_;
     std::map<uint64_t, uint32_t> localPlayerIDs_;
     std::map<uint32_t, uint64_t> steamByPlayerID_;
     std::vector<uint64_t> frozenSteamMembers_;
