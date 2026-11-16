@@ -16,6 +16,8 @@ struct RegisteredAchievement
     std::string displayName;
     unsigned int maxProgress;
     bool conflicted = false;
+
+    RegisteredAchievement(const char* name, unsigned int progress) : displayName(name), maxProgress(progress) {}
 };
 
 // Keep registration state in the Carbon DLL, with ordinary process-exit cleanup.

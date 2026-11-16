@@ -117,7 +117,7 @@ private:
 class CARBON_API ConnectionPlatformInterface : public EventHandler, private Noncopyable
 {
 public:
-    virtual ~ConnectionPlatformInterface() {}
+    ~ConnectionPlatformInterface() override {}
 
     /** Synchronous selection check. Authentication and state loading may continue asynchronously. */
     virtual bool isAvailable() const { return true; }

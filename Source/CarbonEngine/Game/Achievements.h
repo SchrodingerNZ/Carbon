@@ -47,6 +47,14 @@ private:
 
 // Stringified C++ symbol is the canonical platform achievement ID.
 // Omitting Maximum value-initializes maxProgress to zero for boolean achievements.
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wc++98-compat-pedantic"
+#endif
 #define ACHIEVEMENT(Symbol, ...)                                                       \
     static const Carbon::AchievementDefinition Symbol = {#Symbol, __VA_ARGS__};       \
     static const Carbon::AchievementRegistration Symbol##_registration(Symbol)
+
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif
