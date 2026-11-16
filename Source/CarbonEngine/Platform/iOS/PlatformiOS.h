@@ -56,6 +56,7 @@ public:
     void onTouchesEnded(NSSet<UITouch*>* touches, UIEvent* event);
     void onTouchesMoved(NSSet<UITouch*>* touches, UIEvent* event);
     void onGestureRecognized(UIGestureRecognizer* gesture);
+    void onWindowResized();
 
     void setWindow(UIWindow* window) { window_ = window; }
 
@@ -74,6 +75,8 @@ private:
 
     Vec2 convertScreenPosition(CGPoint p) const;
     Vec2 convertScreenVector(CGPoint v) const;
+
+    void updateResolutionFromDrawable();
 
     Vector<UITapGestureRecognizer*> tapGestures_;
     UIPinchGestureRecognizer* pinchGesture_ = nil;

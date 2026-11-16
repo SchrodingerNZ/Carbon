@@ -155,6 +155,18 @@ extern Application* iOSCreateApplication();
     [[self applicationDelegate] initializeApplicationWithWindow:window];
 }
 
+- (void)windowScene:(UIWindowScene*)windowScene
+    didUpdateCoordinateSpace:(id<UICoordinateSpace>)previousCoordinateSpace
+        interfaceOrientation:(UIInterfaceOrientation)previousInterfaceOrientation
+             traitCollection:(UITraitCollection*)previousTraitCollection
+{
+    // UIKit owns iPad window geometry. Once the Carbon application is running, mirror any scene-size change into the
+    // rendering surface rather than treating the startup device resolution as immutable.
+    auto applicationDelegate = [self applicationDelegate];
+    if (applicationDelegate.application)
+        static_cast<Carbon::PlatformiOS&>(Carbon::platform()).onWindowResized();
+}
+
 - (void)sceneDidBecomeActive:(UIScene*)scene
 {
     LOG_INFO << "iOS scene became active";
