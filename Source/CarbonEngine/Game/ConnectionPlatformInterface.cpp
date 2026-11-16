@@ -122,10 +122,17 @@ private:
 // The Null provider remains the default even when an optional native provider is registered.
 CARBON_REGISTER_INTERFACE_IMPLEMENTATION(ConnectionPlatformInterface, NullConnectionPlatform, 1)
 
+#if defined(WINDOWS) || defined(MACOS)
+
+// Keep the Steam flat API calling convention platform-neutral without exposing Steamworks headers.
 #ifdef WINDOWS
+    #define CARBON_STEAM_CALL __cdecl
+#else
+    #define CARBON_STEAM_CALL
+#endif
 
 // Flat Steamworks exports let Carbon keep the SDK optional at build and runtime.
-// The callback payload layouts below follow Steamworks' Windows x86/x64 ABI.
+// Private callback payload mirrors must match the Steamworks ABI for the target architecture.
 struct SteamCallbackMessage
 {
     int user;
@@ -149,14 +156,14 @@ static_assert(offsetof(SteamLobbyChatMessage, chatID) == 20, "Unexpected Steam l
 class SteamAchievements : public AchievementInterface
 {
 public:
-    using UserStatsFunction = void* (__cdecl *)();
-    using GetAchievementFunction = bool (__cdecl *)(void*, const char*, bool*);
-    using GetStatFunction = bool (__cdecl *)(void*, const char*, int32_t*);
-    using SetAchievementFunction = bool (__cdecl *)(void*, const char*);
-    using SetStatFunction = bool (__cdecl *)(void*, const char*, int32_t);
-    using StoreFunction = bool (__cdecl *)(void*);
-    using GetNumAchievementsFunction = uint32_t (__cdecl *)(void*);
-    using GetAchievementNameFunction = const char* (__cdecl *)(void*, uint32_t);
+    using UserStatsFunction = void* (CARBON_STEAM_CALL *)();
+    using GetAchievementFunction = bool (CARBON_STEAM_CALL *)(void*, const char*, bool*);
+    using GetStatFunction = bool (CARBON_STEAM_CALL *)(void*, const char*, int32_t*);
+    using SetAchievementFunction = bool (CARBON_STEAM_CALL *)(void*, const char*);
+    using SetStatFunction = bool (CARBON_STEAM_CALL *)(void*, const char*, int32_t);
+    using StoreFunction = bool (CARBON_STEAM_CALL *)(void*);
+    using GetNumAchievementsFunction = uint32_t (CARBON_STEAM_CALL *)(void*);
+    using GetAchievementNameFunction = const char* (CARBON_STEAM_CALL *)(void*, uint32_t);
 
     bool initialize(const SharedLibrary& library)
     {
@@ -405,40 +412,40 @@ private:
 class SteamMultiplayer : public MultiplayerInterface
 {
 public:
-    using GetMatchmakingFunction = void* (__cdecl *)();
-    using AddFilterFunction = void (__cdecl *)(void*, const char*, const char*, int);
-    using RequestListFunction = uint64_t (__cdecl *)(void*);
-    using GetLobbyByIndexFunction = uint64_t (__cdecl *)(void*, int);
-    using CreateLobbyFunction = uint64_t (__cdecl *)(void*, int, int);
-    using JoinLobbyFunction = uint64_t (__cdecl *)(void*, uint64_t);
-    using LeaveLobbyFunction = void (__cdecl *)(void*, uint64_t);
-    using SetLobbyDataFunction = bool (__cdecl *)(void*, uint64_t, const char*, const char*);
-    using GetLobbyDataFunction = const char* (__cdecl *)(void*, uint64_t, const char*);
-    using GetAPICallResultFunction = bool (__cdecl *)(int, uint64_t, void*, int, int, bool*);
+    using GetMatchmakingFunction = void* (CARBON_STEAM_CALL *)();
+    using AddFilterFunction = void (CARBON_STEAM_CALL *)(void*, const char*, const char*, int);
+    using RequestListFunction = uint64_t (CARBON_STEAM_CALL *)(void*);
+    using GetLobbyByIndexFunction = uint64_t (CARBON_STEAM_CALL *)(void*, int);
+    using CreateLobbyFunction = uint64_t (CARBON_STEAM_CALL *)(void*, int, int);
+    using JoinLobbyFunction = uint64_t (CARBON_STEAM_CALL *)(void*, uint64_t);
+    using LeaveLobbyFunction = void (CARBON_STEAM_CALL *)(void*, uint64_t);
+    using SetLobbyDataFunction = bool (CARBON_STEAM_CALL *)(void*, uint64_t, const char*, const char*);
+    using GetLobbyDataFunction = const char* (CARBON_STEAM_CALL *)(void*, uint64_t, const char*);
+    using GetAPICallResultFunction = bool (CARBON_STEAM_CALL *)(int, uint64_t, void*, int, int, bool*);
 
     // The Steam flat interface keeps Steamworks headers out of Carbon's public SDK.
-    using GetSocketsFunction = void* (__cdecl *)();
-    using CreateListenSocketFunction = uint32_t (__cdecl *)(void*, int, int, const void*);
-    using ConnectP2PFunction = uint32_t (__cdecl *)(void*, const void*, int, int, const void*);
-    using AcceptConnectionFunction = int (__cdecl *)(void*, uint32_t);
-    using CloseConnectionFunction = bool (__cdecl *)(void*, uint32_t, int, const char*, bool);
-    using CloseListenSocketFunction = bool (__cdecl *)(void*, uint32_t);
-    using SendMessageFunction = int (__cdecl *)(void*, uint32_t, const void*, uint32_t, int, int64_t*);
-    using ReceiveMessagesFunction = int (__cdecl *)(void*, uint32_t, void**, int);
-    using ReleaseMessageFunction = void (__cdecl *)(void*);
-    using GetConnectionInfoFunction = bool (__cdecl *)(void*, uint32_t, void*);
-    using GetLobbyOwnerFunction = uint64_t (__cdecl *)(void*, uint64_t);
-    using GetLobbyMemberCountFunction = int (__cdecl *)(void*, uint64_t);
-    using GetLobbyMemberFunction = uint64_t (__cdecl *)(void*, uint64_t, int);
-    using SetLobbyJoinableFunction = bool (__cdecl *)(void*, uint64_t, bool);
-    using SendLobbyChatFunction = bool (__cdecl *)(void*, uint64_t, const void*, int);
-    using GetLobbyChatFunction = int (__cdecl *)(void*, uint64_t, int, uint64_t*, void*, int, int*);
-    using GetSteamUserFunction = void* (__cdecl *)();
-    using GetSteamIDFunction = uint64_t (__cdecl *)(void*);
-    using GetFriendsFunction = void* (__cdecl *)();
-    using GetPersonaNameFunction = const char* (__cdecl *)(void*);
-    using GetFriendPersonaNameFunction = const char* (__cdecl *)(void*, uint64_t);
-    using SetRichPresenceFunction = bool (__cdecl *)(void*, const char*, const char*);
+    using GetSocketsFunction = void* (CARBON_STEAM_CALL *)();
+    using CreateListenSocketFunction = uint32_t (CARBON_STEAM_CALL *)(void*, int, int, const void*);
+    using ConnectP2PFunction = uint32_t (CARBON_STEAM_CALL *)(void*, const void*, int, int, const void*);
+    using AcceptConnectionFunction = int (CARBON_STEAM_CALL *)(void*, uint32_t);
+    using CloseConnectionFunction = bool (CARBON_STEAM_CALL *)(void*, uint32_t, int, const char*, bool);
+    using CloseListenSocketFunction = bool (CARBON_STEAM_CALL *)(void*, uint32_t);
+    using SendMessageFunction = int (CARBON_STEAM_CALL *)(void*, uint32_t, const void*, uint32_t, int, int64_t*);
+    using ReceiveMessagesFunction = int (CARBON_STEAM_CALL *)(void*, uint32_t, void**, int);
+    using ReleaseMessageFunction = void (CARBON_STEAM_CALL *)(void*);
+    using GetConnectionInfoFunction = bool (CARBON_STEAM_CALL *)(void*, uint32_t, void*);
+    using GetLobbyOwnerFunction = uint64_t (CARBON_STEAM_CALL *)(void*, uint64_t);
+    using GetLobbyMemberCountFunction = int (CARBON_STEAM_CALL *)(void*, uint64_t);
+    using GetLobbyMemberFunction = uint64_t (CARBON_STEAM_CALL *)(void*, uint64_t, int);
+    using SetLobbyJoinableFunction = bool (CARBON_STEAM_CALL *)(void*, uint64_t, bool);
+    using SendLobbyChatFunction = bool (CARBON_STEAM_CALL *)(void*, uint64_t, const void*, int);
+    using GetLobbyChatFunction = int (CARBON_STEAM_CALL *)(void*, uint64_t, int, uint64_t*, void*, int, int*);
+    using GetSteamUserFunction = void* (CARBON_STEAM_CALL *)();
+    using GetSteamIDFunction = uint64_t (CARBON_STEAM_CALL *)(void*);
+    using GetFriendsFunction = void* (CARBON_STEAM_CALL *)();
+    using GetPersonaNameFunction = const char* (CARBON_STEAM_CALL *)(void*);
+    using GetFriendPersonaNameFunction = const char* (CARBON_STEAM_CALL *)(void*, uint64_t);
+    using SetRichPresenceFunction = bool (CARBON_STEAM_CALL *)(void*, const char*, const char*);
 
     // SteamNetworkingIdentity: 32-bit type + 32-bit size + 128 bytes of identity data.
     // SteamID identities have type 16 and place the 64-bit user ID at byte offset 8.
@@ -1025,7 +1032,7 @@ public:
     // Steam supplies the authenticated sender separately from untrusted message bytes.
     void onLobbyChat(const unsigned char* data, int size)
     {
-        if (!lobbyID_ || !data || size < sizeof(SteamLobbyChatMessage) || !getLobbyChat_)
+        if (!lobbyID_ || !data || size < int(sizeof(SteamLobbyChatMessage)) || !getLobbyChat_)
             return;
 
         // Copy the callback to avoid assuming Steam's buffer alignment.
@@ -1682,7 +1689,9 @@ public:
                 return;
             }
 
-            peers_[peer] = {handle, false};
+            PeerConnection connection;
+            connection.handle = handle;
+            peers_[peer] = connection;
             LOG_INFO << "Steam multiplayer: accepting connection from peer " << peer;
         }
 
@@ -2146,7 +2155,9 @@ public:
                 const auto handle = connectP2P_(sockets_, &identity, 0, 0, nullptr);
                 if (handle)
                 {
-                    peers_[owner] = {handle, false};
+                    PeerConnection connection;
+                    connection.handle = handle;
+                    peers_[owner] = connection;
                     LOG_INFO << "Steam multiplayer: connecting to lobby owner " << owner;
                 }
                 else
@@ -2344,12 +2355,23 @@ public:
     SteamConnectionPlatform()
     {
         // Load Steamworks only for clients that explicitly select the Steam provider.
+#ifdef WINDOWS
         const auto libraryName = sizeof(void*) == 8 ? "steam_api64.dll" : "steam_api.dll";
         if (!steamLibrary_.load(libraryName))
         {
             LOG_WARNING_WITHOUT_CALLER << "Steam connection unavailable: could not load " << libraryName;
             return;
         }
+#else
+        // Prefer an application-bundled runtime, without requiring a Steamworks SDK at build time.
+        // The fallback also permits development environments with a configured dyld search path.
+        if (!steamLibrary_.load("@executable_path/../Frameworks/libsteam_api.dylib") &&
+            !steamLibrary_.load("libsteam_api.dylib"))
+        {
+            LOG_WARNING_WITHOUT_CALLER << "Steam connection unavailable: could not load libsteam_api.dylib";
+            return;
+        }
+#endif
 
         initialize_ = steamLibrary_.mapFunction<InitializeFunction>("SteamAPI_InitFlat");
         shutdown_ = steamLibrary_.mapFunction<ShutdownFunction>("SteamAPI_Shutdown");
@@ -2495,13 +2517,13 @@ public:
     }
 
 private:
-    using InitializeFunction = int (__cdecl *)(char*);
-    using ShutdownFunction = void (__cdecl *)();
-    using ManualInitFunction = void (__cdecl *)();
-    using GetPipeFunction = int (__cdecl *)();
-    using RunFrameFunction = void (__cdecl *)(int);
-    using NextCallbackFunction = bool (__cdecl *)(int, SteamCallbackMessage*);
-    using FreeCallbackFunction = void (__cdecl *)(int);
+    using InitializeFunction = int (CARBON_STEAM_CALL *)(char*);
+    using ShutdownFunction = void (CARBON_STEAM_CALL *)();
+    using ManualInitFunction = void (CARBON_STEAM_CALL *)();
+    using GetPipeFunction = int (CARBON_STEAM_CALL *)();
+    using RunFrameFunction = void (CARBON_STEAM_CALL *)(int);
+    using NextCallbackFunction = bool (CARBON_STEAM_CALL *)(int, SteamCallbackMessage*);
+    using FreeCallbackFunction = void (CARBON_STEAM_CALL *)(int);
 
     SharedLibrary steamLibrary_;
     InitializeFunction initialize_ = nullptr;
@@ -2519,6 +2541,7 @@ private:
 
 CARBON_REGISTER_INTERFACE_IMPLEMENTATION(ConnectionPlatformInterface, SteamConnectionPlatform, 0)
 
+#undef CARBON_STEAM_CALL
 #endif
 
 }
