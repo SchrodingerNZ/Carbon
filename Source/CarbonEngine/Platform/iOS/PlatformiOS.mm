@@ -205,21 +205,13 @@ bool PlatformiOS::setup()
     keyboardInputTextFieldDelegate_ = [[KeyboardInputTextFieldDelegate alloc] init];
     [keyboardInputTextField_ setDelegate:keyboardInputTextFieldDelegate_];
 
-    // Setup resolutions array with the main resolution
-    resolutions_.emplace(int(view_.frame.size.width), int(view_.frame.size.height));
+    // iOS window geometry is owned by UIKit. Seed the resolution list with the window's current drawable size; once
+    // the renderbuffer exists this list is kept to a single live resolution matching the actual drawable.
+    const auto scale = areRetinaResolutionsEnabled() ? [UIScreen mainScreen].nativeScale : CGFloat(1.0);
+    resolutions_.emplace(int(view_.bounds.size.width * scale), int(view_.bounds.size.height * scale), false, scale > 1);
     nativeResolution_ = resolutions_.back();
 
-    const auto scale = [UIScreen mainScreen].scale;
     LOG_INFO << "iOS main screen content scale: " << scale;
-
-    // Retina resolution support
-    if (scale > CGFloat(1.0))
-    {
-        resolutions_.emplace(int(view_.frame.size.width * scale), int(view_.frame.size.height * scale), false, true);
-
-        if (areRetinaResolutionsEnabled())
-            nativeResolution_ = resolutions_.back();
-    }
 
     sortResolutions();
 
@@ -258,17 +250,8 @@ bool PlatformiOS::createWindow(const Resolution& resolution, WindowMode windowMo
         return false;
     }
 
-    auto newResolution = resolution;
-
-    // If a retina resolution was requested but they are disabled then fall back to the equivalent non-retina resolution
-    if (newResolution.isRetinaResolution() && !areRetinaResolutionsEnabled())
-    {
-        const auto scale = uint([UIScreen mainScreen].scale);
-        newResolution = findResolution(newResolution.getWidth() / scale, newResolution.getHeight() / scale);
-    }
-
-    // Use retina display if requested
-    view_.contentScaleFactor = CGFloat(newResolution.isRetinaResolution() ? [UIScreen mainScreen].nativeScale : 1);
+    // The requested resolution selects startup policy only; UIKit owns the actual window dimensions.
+    view_.contentScaleFactor = areRetinaResolutionsEnabled() ? [UIScreen mainScreen].nativeScale : CGFloat(1.0);
     view_.layer.contentsScale = view_.contentScaleFactor;
 
     // Create and bind a framebuffer
@@ -312,11 +295,10 @@ bool PlatformiOS::createWindow(const Resolution& resolution, WindowMode windowMo
     glBindRenderbuffer(GL_RENDERBUFFER, colorRenderbuffer_);
     CARBON_CHECK_OPENGL_ERROR(glBindRenderbuffer);
 
-    currentResolution_ = newResolution;
+    updateResolutionFromDrawable();
     updatePersistentSettings();
-    sendResizeEvent();
 
-    LOG_INFO << "Window created, resolution: " << newResolution;
+    LOG_INFO << "Window created, resolution: " << currentResolution_;
 
     return true;
 }
@@ -353,6 +335,72 @@ void PlatformiOS::destroyWindow()
     fsaaMode_ = FSAANone;
 
     LOG_INFO << "Window destroyed";
+}
+
+void PlatformiOS::updateResolutionFromDrawable()
+{
+    if (!colorRenderbuffer_)
+        return;
+
+    glBindRenderbuffer(GL_RENDERBUFFER, colorRenderbuffer_);
+    CARBON_CHECK_OPENGL_ERROR(glBindRenderbuffer);
+
+    auto width = GLint();
+    auto height = GLint();
+    glGetRenderbufferParameteriv(GL_RENDERBUFFER, GL_RENDERBUFFER_WIDTH, &width);
+    CARBON_CHECK_OPENGL_ERROR(glGetRenderbufferParameteriv);
+    glGetRenderbufferParameteriv(GL_RENDERBUFFER, GL_RENDERBUFFER_HEIGHT, &height);
+    CARBON_CHECK_OPENGL_ERROR(glGetRenderbufferParameteriv);
+
+    if (width <= 0 || height <= 0)
+        return;
+
+    resolutions_.clear();
+    resolutions_.emplace(uint(width), uint(height), false, view_.contentScaleFactor > CGFloat(1.0));
+    nativeResolution_ = resolutions_.back();
+    currentResolution_ = nativeResolution_;
+
+    sendResizeEvent();
+}
+
+void PlatformiOS::onWindowResized()
+{
+    if (!window_ || !view_ || !context_ || !framebuffer_ || !colorRenderbuffer_ || !depthStencilRenderbuffer_)
+        return;
+
+    auto oldResolution = currentResolution_;
+
+    view_.frame = window_.bounds;
+    [EAGLContext setCurrentContext:context_];
+
+    glBindFramebuffer(GL_FRAMEBUFFER, framebuffer_);
+    CARBON_CHECK_OPENGL_ERROR(glBindFramebuffer);
+
+    // Resize the color renderbuffer to the CAEAGLLayer's new drawable dimensions.
+    glBindRenderbuffer(GL_RENDERBUFFER, colorRenderbuffer_);
+    CARBON_CHECK_OPENGL_ERROR(glBindRenderbuffer);
+    [context_ renderbufferStorage:GL_RENDERBUFFER fromDrawable:static_cast<CAEAGLLayer*>(view_.layer)];
+
+    auto framebufferWidth = GLint();
+    auto framebufferHeight = GLint();
+    glGetRenderbufferParameteriv(GL_RENDERBUFFER, GL_RENDERBUFFER_WIDTH, &framebufferWidth);
+    CARBON_CHECK_OPENGL_ERROR(glGetRenderbufferParameteriv);
+    glGetRenderbufferParameteriv(GL_RENDERBUFFER, GL_RENDERBUFFER_HEIGHT, &framebufferHeight);
+    CARBON_CHECK_OPENGL_ERROR(glGetRenderbufferParameteriv);
+
+    // Keep the depth/stencil buffer exactly matched to the resized color surface.
+    glBindRenderbuffer(GL_RENDERBUFFER, depthStencilRenderbuffer_);
+    CARBON_CHECK_OPENGL_ERROR(glBindRenderbuffer);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8_OES, framebufferWidth, framebufferHeight);
+    CARBON_CHECK_OPENGL_ERROR(glRenderbufferStorage);
+
+    glBindRenderbuffer(GL_RENDERBUFFER, colorRenderbuffer_);
+    CARBON_CHECK_OPENGL_ERROR(glBindRenderbuffer);
+
+    updateResolutionFromDrawable();
+
+    if (currentResolution_ != oldResolution)
+        LOG_INFO << "iOS window resized from " << oldResolution << " to " << currentResolution_;
 }
 
 VoidFunction PlatformiOS::getOpenGLFunctionAddress(const String& function) const
