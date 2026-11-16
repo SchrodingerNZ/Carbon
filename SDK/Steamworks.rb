@@ -31,6 +31,15 @@ module Steamworks
     }
   end
 
+  # macOS is independent of the Windows DLL/import-library layout.
+  def self.macos_runtime_files
+    library = File.join(sdk_path, 'redistributable_bin', 'osx', 'libsteam_api.dylib')
+    header = File.join(sdk_path, 'public', 'steam', 'steam_api.h')
+    return {} unless File.file?(header) && File.file?(library)
+
+    { 'libsteam_api.dylib' => library }
+  end
+
   def self.report
     if available?
       puts 'Steamworks: optional x86/x64 SDK detected; runtime DLLs will be packaged.'

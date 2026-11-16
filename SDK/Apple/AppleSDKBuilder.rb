@@ -4,6 +4,7 @@
 #
 
 require 'tmpdir'
+require "#{REPOSITORY_ROOT}/SDK/Steamworks.rb"
 
 # Subclass of SDKBuilderBase that creates the SDK package for macOS & iOS.
 class AppleSDKBuilder < SDKBuilderBase
@@ -28,6 +29,7 @@ class AppleSDKBuilder < SDKBuilderBase
     sample_applications.each { |sample| create_sample_application sample }
     copy_sample_applications_xcode_project
     copy_licenses
+    copy_steamworks_runtime
     create_final_sdk_package
   end
 
@@ -145,6 +147,13 @@ class AppleSDKBuilder < SDKBuilderBase
   def copy_licenses
     dependency_licenses do |license, dependency|
       cp license, "#{@package_root}/Licenses/#{dependency}#{File.basename license}"
+    end
+  end
+
+  # Only the redistributable macOS runtime is bundled, never SDK headers or import libraries.
+  def copy_steamworks_runtime
+    Steamworks.macos_runtime_files.each do |name, source|
+      cp source, "#{@package_root}/Runtime/macOS/#{name}"
     end
   end
 

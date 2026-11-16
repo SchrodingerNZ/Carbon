@@ -237,10 +237,11 @@ end
 
 # Class for creating installers for macOS
 class MacOSInstallerCreator < InstallerCreatorBase
-  attr_accessor :create_dmg
+  attr_accessor :create_dmg, :runtime_libraries
 
   def initialize
     self.create_dmg = true
+    self.runtime_libraries = []
   end
 
   private
@@ -265,6 +266,7 @@ class MacOSInstallerCreator < InstallerCreatorBase
     app_bundle_copy_icon
     app_bundle_create_info_plist
     app_bundle_copy_assets
+    app_bundle_copy_runtime_libraries
   end
 
   def app_bundle_path
@@ -296,6 +298,18 @@ class MacOSInstallerCreator < InstallerCreatorBase
       FileUtils.mkpath File.dirname(target)
 
       run "cp #{source.quoted} #{target.quoted}", echo: false, error: 'File copy failed'
+    end
+  end
+
+  # Explicitly requested redistributable libraries are embedded in the app.
+  # A Steam-enabled client can pass the SDK Runtime/macOS/libsteam_api.dylib.
+  def app_bundle_copy_runtime_libraries
+    Array(runtime_libraries).each do |source|
+      error "Runtime library does not exist: #{source}" unless File.file?(source)
+
+      target_directory = "#{app_bundle_path}/Contents/Frameworks"
+      FileUtils.mkpath target_directory
+      FileUtils.cp source, target_directory
     end
   end
 
