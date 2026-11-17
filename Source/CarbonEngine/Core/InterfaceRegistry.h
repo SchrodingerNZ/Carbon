@@ -135,7 +135,8 @@ public:
         {
             if ((*implementations_)[i]->getName() == OverrideImplementationName)
             {
-                implementations_->prepend((*implementations_)[i]);
+                auto* selectedImplementation = (*implementations_)[i];
+                implementations_->prepend(selectedImplementation);
                 implementations_->erase(i + 1);
                 break;
             }

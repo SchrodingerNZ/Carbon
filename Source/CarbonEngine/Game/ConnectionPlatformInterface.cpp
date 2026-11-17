@@ -2354,6 +2354,7 @@ class SteamConnectionPlatform : public ConnectionPlatformInterface
 public:
     SteamConnectionPlatform()
     {
+        LOG_INFO << "Steam connection: constructor entered";
         // Load Steamworks only for clients that explicitly select the Steam provider.
 #ifdef WINDOWS
         const auto libraryName = sizeof(void*) == 8 ? "steam_api64.dll" : "steam_api.dll";
@@ -2363,15 +2364,19 @@ public:
             return;
         }
 #else
-        // Prefer an application-bundled runtime, without requiring a Steamworks SDK at build time.
-        // The fallback also permits development environments with a configured dyld search path.
-        if (!steamLibrary_.load("@executable_path/../Frameworks/libsteam_api.dylib") &&
+        // Match a Steamworks runtime linked by a client application (e.g. Endeavor).
+        // Also support Carbon's SDK packaging layout and developer dyld search paths.
+        LOG_INFO << "Steam connection: searching for macOS Steamworks runtime";
+        if (!steamLibrary_.load("@executable_path/libsteam_api.dylib") &&
+            !steamLibrary_.load("@executable_path/../Frameworks/libsteam_api.dylib") &&
             !steamLibrary_.load("libsteam_api.dylib"))
         {
             LOG_WARNING_WITHOUT_CALLER << "Steam connection unavailable: could not load libsteam_api.dylib";
             return;
         }
 #endif
+        LOG_INFO << "Steam connection: loaded " << steamLibrary_.getName();
+        LOG_INFO << "Steam connection: resolving lifecycle exports";
 
         initialize_ = steamLibrary_.mapFunction<InitializeFunction>("SteamAPI_InitFlat");
         shutdown_ = steamLibrary_.mapFunction<ShutdownFunction>("SteamAPI_Shutdown");
@@ -2401,6 +2406,7 @@ public:
             return;
 
         // SteamAPI_InitFlat expects a writable SteamErrMsg buffer, including on failure.
+        LOG_INFO << "Steam connection: lifecycle exports resolved; calling SteamAPI_InitFlat";
         char error[1024] = {};
         const auto initResult = initialize_(error);
         LOG_INFO << "Steam connection: SteamAPI_InitFlat result " << initResult;
