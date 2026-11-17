@@ -169,12 +169,8 @@ public:
     {
         // Map only the user-stats functions required by Carbon's achievement capability.
         auto getUserStats = library.mapFunction<UserStatsFunction>("SteamAPI_SteamUserStats_v013");
-        if (getUserStats)
-        else
-        {
+        if (!getUserStats)
             getUserStats = library.mapFunction<UserStatsFunction>("SteamAPI_SteamUserStats_v012");
-            if (getUserStats)
-        }
 
         getAchievement_ = library.mapFunction<GetAchievementFunction>("SteamAPI_ISteamUserStats_GetAchievement");
         getStat_ = library.mapFunction<GetStatFunction>("SteamAPI_ISteamUserStats_GetStatInt32");
@@ -206,7 +202,6 @@ public:
         userStats_ = getUserStats();
         if (!userStats_)
             LOG_WARNING_WITHOUT_CALLER << "Steam achievements: SteamUserStats interface returned null";
-        else
 
         return userStats_ != nullptr;
     }
