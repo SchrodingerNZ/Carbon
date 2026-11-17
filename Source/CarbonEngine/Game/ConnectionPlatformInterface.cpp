@@ -170,12 +170,10 @@ public:
         // Map only the user-stats functions required by Carbon's achievement capability.
         auto getUserStats = library.mapFunction<UserStatsFunction>("SteamAPI_SteamUserStats_v013");
         if (getUserStats)
-            LOG_INFO << "Steam achievements: user-stats interface v013 export found";
         else
         {
             getUserStats = library.mapFunction<UserStatsFunction>("SteamAPI_SteamUserStats_v012");
             if (getUserStats)
-                LOG_INFO << "Steam achievements: user-stats interface v012 export found";
         }
 
         getAchievement_ = library.mapFunction<GetAchievementFunction>("SteamAPI_ISteamUserStats_GetAchievement");
@@ -209,7 +207,6 @@ public:
         if (!userStats_)
             LOG_WARNING_WITHOUT_CALLER << "Steam achievements: SteamUserStats interface returned null";
         else
-            LOG_INFO << "Steam achievements: user-stats interface acquired";
 
         return userStats_ != nullptr;
     }
@@ -288,7 +285,7 @@ public:
                 bool granted = false;
                 if (firstID && getAchievement_(userStats_, firstID, &granted))
                 {
-                    LOG_INFO << "Steam achievements: local cache available (" << count << " published achievements)";
+                    LOG_INFO << LogStyle("Multiplayer") << "Steam achievements: local cache available (" << count << " published achievements)";
                     markReady();
                 }
             }
@@ -320,7 +317,7 @@ private:
             return;
 
         ready_ = true;
-        LOG_INFO << "Steam achievements ready";
+        LOG_INFO << LogStyle("Multiplayer") << "Steam achievements ready";
 
         // Apply locally queued requests only after remote values can be read.
         for (auto& entry : entries_)
@@ -549,7 +546,7 @@ public:
                      sendLobbyChat_ && getLobbyChat_;
 
         if (available_)
-            LOG_INFO << "Steam multiplayer: lobby discovery/hosting/joining available";
+            LOG_INFO << LogStyle("Multiplayer") << "Steam multiplayer: lobby discovery/hosting/joining available";
         else
             LOG_WARNING_WITHOUT_CALLER << "Steam multiplayer: required matchmaking exports unavailable";
 
@@ -583,7 +580,6 @@ public:
             return false;
 
         const bool accepted = setRichPresence_(steamFriends_, key.cStr(), value.cStr());
-        LOG_INFO << "Steam platform value SET key=" << key << " value=" << value << " accepted=" << accepted;
         if (!accepted)
             return false;
 
@@ -599,7 +595,6 @@ public:
 
         // Steam removes this key when its value is null; other keys are untouched.
         const bool accepted = setRichPresence_(steamFriends_, key.cStr(), nullptr);
-        LOG_INFO << "Steam platform value CLEAR key=" << key << " accepted=" << accepted;
         if (!accepted)
             return false;
 
@@ -615,8 +610,6 @@ public:
             for (const auto& key : platformValueKeys_)
             {
                 const bool accepted = setRichPresence_(steamFriends_, key.c_str(), nullptr);
-                LOG_INFO << "Steam platform value SESSION CLEAR key=" << key.c_str() << " accepted=" << accepted
-                         << " lobby=" << lobbyID_;
                 if (!accepted)
                     LOG_WARNING_WITHOUT_CALLER << "Steam multiplayer: could not clear platform value " << key.c_str();
             }
@@ -841,7 +834,7 @@ public:
         confirmedMembers_.clear();
         confirmedMembers_.insert(localSteamID_);
         announceManifestRevision(manifestRevision_);
-        LOG_INFO << "Steam multiplayer: ManifestUpdated revision " << manifestRevision_
+        LOG_INFO << LogStyle("Multiplayer") << "Steam multiplayer: ManifestUpdated revision " << manifestRevision_
                  << ", members=" << members.size();
         return true;
     }
@@ -930,7 +923,7 @@ public:
         {
             confirmedRevision_ = revision;
             confirmedPhase_ = sessionState_;
-            LOG_INFO << "Steam multiplayer: ManifestConfirm sent for revision " << revision;
+            LOG_INFO << LogStyle("Multiplayer") << "Steam multiplayer: ManifestConfirm sent for revision " << revision;
         }
     }
 
@@ -979,7 +972,7 @@ public:
         if (sendLobbyChat_)
             sendLobbyChat_(matchmaking_, lobbyID_, message.data(), int(message.size()));
 
-        LOG_INFO << "Steam multiplayer: all manifest confirmations and game readiness received; Playing";
+        LOG_INFO << LogStyle("Multiplayer") << "Steam multiplayer: all manifest confirmations and game readiness received; Playing";
     }
 
     // Application readiness follows the validated Syncing notification.
@@ -1003,7 +996,7 @@ public:
         {
             localReadySentRevision_ = revision;
             localReadySentValue_ = localReadyRequested_;
-            LOG_INFO << "Steam multiplayer: PlayerReady " << localReadyRequested_ << " sent for revision " << revision;
+            LOG_INFO << LogStyle("Multiplayer") << "Steam multiplayer: PlayerReady " << localReadyRequested_ << " sent for revision " << revision;
         }
     }
 
@@ -1056,7 +1049,7 @@ public:
         if (message.compare(0, updatedPrefix.size(), updatedPrefix) == 0)
         {
             if (sender == getLobbyOwner_(matchmaking_, lobbyID_))
-                LOG_INFO << "Steam multiplayer: ManifestUpdated received from host";
+                LOG_INFO << LogStyle("Multiplayer") << "Steam multiplayer: ManifestUpdated received from host";
             return;
         }
 
@@ -1087,7 +1080,7 @@ public:
             else
                 return;
 
-            LOG_INFO << "Steam multiplayer: PlayerReady " << value.c_str() << " from " << sender;
+            LOG_INFO << LogStyle("Multiplayer") << "Steam multiplayer: PlayerReady " << value.c_str() << " from " << sender;
             beginPlayingIfReady();
             return;
         }
@@ -1097,7 +1090,7 @@ public:
         if (message.compare(0, beginPrefix.size(), beginPrefix) == 0)
         {
             if (sender == getLobbyOwner_(matchmaking_, lobbyID_))
-                LOG_INFO << "Steam multiplayer: BeginPlaying received from host";
+                LOG_INFO << LogStyle("Multiplayer") << "Steam multiplayer: BeginPlaying received from host";
             return;
         }
 
@@ -1137,11 +1130,11 @@ public:
 
         if (confirmedMembers_.insert(sender).second)
         {
-            LOG_INFO << "Steam multiplayer: ManifestConfirm accepted from " << sender
+            LOG_INFO << LogStyle("Multiplayer") << "Steam multiplayer: ManifestConfirm accepted from " << sender
                      << " for revision " << revision;
             if (sessionState_ == MultiplayerSessionState::Syncing &&
                 confirmedMembers_.size() == frozenSteamMembers_.size())
-                LOG_INFO << "Steam multiplayer: all locked members confirmed manifest revision " << revision;
+                LOG_INFO << LogStyle("Multiplayer") << "Steam multiplayer: all locked members confirmed manifest revision " << revision;
             beginPlayingIfReady();
         }
     }
@@ -1202,7 +1195,7 @@ public:
         localReadySentValue_ = -1;
         updateSessionRegistry();
         announceManifestRevision(manifestRevision_);
-        LOG_INFO << "Steam multiplayer: session player roster locked for synchronization";
+        LOG_INFO << LogStyle("Multiplayer") << "Steam multiplayer: session player roster locked for synchronization";
         return true;
     }
 
@@ -1450,7 +1443,7 @@ public:
                 {
                     const auto newID = nextPlayerID_++;
                     found = localPlayerIDs_.insert({steamID, newID}).first;
-                    LOG_INFO << "Steam multiplayer: assigned Carbon PlayerID " << newID << " to Steam member " << steamID;
+                    LOG_INFO << LogStyle("Multiplayer") << "Steam multiplayer: assigned Carbon PlayerID " << newID << " to Steam member " << steamID;
                 }
 
                 // Publish the shared ID and display name through the owner-managed lobby data.
@@ -1603,10 +1596,10 @@ public:
 
         if (rosterChanged)
         {
-            LOG_INFO << "Carbon multiplayer: session " << lobbyID_ << " registry has " << roster.size()
+            LOG_INFO << LogStyle("Multiplayer") << "Carbon multiplayer: session " << lobbyID_ << " registry has " << roster.size()
                      << " players (local=" << localID.getValue() << ", host=" << hostID.getValue() << ")";
             for (const auto& player : roster)
-                LOG_INFO << "Carbon multiplayer: PlayerID=" << player.getID().getValue()
+                LOG_INFO << LogStyle("Multiplayer") << "Carbon multiplayer: PlayerID=" << player.getID().getValue()
                          << " name=" << player.getName();
         }
     }
@@ -1621,7 +1614,7 @@ public:
 
             // Preserve lobby membership and PlayerID; registry reconciliation reports
             // the connectivity transition through the application event system.
-            LOG_INFO << "Steam multiplayer: peer disconnected " << it->first;
+            LOG_INFO << LogStyle("Multiplayer") << "Steam multiplayer: peer disconnected " << it->first;
             peers_.erase(it);
             return true;
         }
@@ -1667,7 +1660,7 @@ public:
         const auto listen = info.listenSocket;
         const auto state = info.state;
 
-        LOG_INFO << "Steam multiplayer: connection handle=" << handle
+        LOG_INFO << LogStyle("Multiplayer") << "Steam multiplayer: connection handle=" << handle
                  << " state=" << state << " peer=" << peer
                  << " identityType=" << identityType << " listen=" << listen
                  << " localListen=" << listenSocket_;
@@ -1692,7 +1685,7 @@ public:
             PeerConnection connection;
             connection.handle = handle;
             peers_[peer] = connection;
-            LOG_INFO << "Steam multiplayer: accepting connection from peer " << peer;
+            LOG_INFO << LogStyle("Multiplayer") << "Steam multiplayer: accepting connection from peer " << peer;
         }
 
         // k_ESteamNetworkingConnectionState_Connected = 3.
@@ -1707,7 +1700,7 @@ public:
             }
 
             found->second.connected = true;
-            LOG_INFO << "Steam multiplayer: peer connected " << peer;
+            LOG_INFO << LogStyle("Multiplayer") << "Steam multiplayer: peer connected " << peer;
         }
 
         // ClosedByPeer = 4, ProblemDetectedLocally = 5.
@@ -1795,7 +1788,7 @@ public:
         searching_ = true;
         completed_ = false;
         lobbyCount_ = 0;
-        LOG_INFO << "Steam multiplayer: requested compatible lobbies, network version " << networkVersion;
+        LOG_INFO << LogStyle("Multiplayer") << "Steam multiplayer: requested compatible lobbies, network version " << networkVersion;
         return true;
     }
 
@@ -1926,7 +1919,7 @@ public:
         }
 
         pendingRole_ = Role::Host;
-        LOG_INFO << "Steam multiplayer: creating public lobby for network version " << networkVersion;
+        LOG_INFO << LogStyle("Multiplayer") << "Steam multiplayer: creating public lobby for network version " << networkVersion;
         return true;
     }
 
@@ -1957,7 +1950,7 @@ public:
 
         pendingRole_ = Role::Guest;
         requestedLobbyID_ = candidate;
-        LOG_INFO << "Steam multiplayer: joining discovered lobby " << candidate;
+        LOG_INFO << LogStyle("Multiplayer") << "Steam multiplayer: joining discovered lobby " << candidate;
         return true;
     }
 
@@ -1995,7 +1988,7 @@ public:
         if (lobbyID_ && leaveLobby_)
         {
             leaveLobby_(matchmaking_, lobbyID_);
-            LOG_INFO << "Steam multiplayer: left lobby " << lobbyID_;
+            LOG_INFO << LogStyle("Multiplayer") << "Steam multiplayer: left lobby " << lobbyID_;
         }
 
         lobbyID_ = 0;
@@ -2134,7 +2127,7 @@ public:
         if (generation != sessionGeneration_ || lobbyID_ != enteredID)
             return;
 
-        LOG_INFO << "Steam multiplayer: entered lobby " << lobbyID_ << " (network " << networkVersion_ << ")";
+        LOG_INFO << LogStyle("Multiplayer") << "Steam multiplayer: entered lobby " << lobbyID_ << " (network " << networkVersion_ << ")";
 
         // The host listens; guests initiate their connection to the authoritative lobby owner.
         if (socketsAvailable_)
@@ -2146,7 +2139,7 @@ public:
                 if (!listenSocket_)
                     LOG_WARNING_WITHOUT_CALLER << "Steam multiplayer: could not open P2P listen socket";
                 else
-                    LOG_INFO << "Steam multiplayer: listening for P2P peers";
+                    LOG_INFO << LogStyle("Multiplayer") << "Steam multiplayer: listening for P2P peers";
             }
             else if (owner)
             {
@@ -2158,7 +2151,7 @@ public:
                     PeerConnection connection;
                     connection.handle = handle;
                     peers_[owner] = connection;
-                    LOG_INFO << "Steam multiplayer: connecting to lobby owner " << owner;
+                    LOG_INFO << LogStyle("Multiplayer") << "Steam multiplayer: connecting to lobby owner " << owner;
                 }
                 else
                     LOG_WARNING_WITHOUT_CALLER << "Steam multiplayer: ConnectP2P failed";
@@ -2188,7 +2181,7 @@ public:
             else
             {
                 lobbyCount_ = count;
-                LOG_INFO << "Steam multiplayer: found " << lobbyCount_ << " compatible lobbies";
+                LOG_INFO << LogStyle("Multiplayer") << "Steam multiplayer: found " << lobbyCount_ << " compatible lobbies";
             }
 
             dispatchOperationCompleted(MultiplayerOperation::FindLobbies, completed_);
@@ -2215,7 +2208,7 @@ public:
                 return;
             }
 
-            LOG_INFO << "Steam multiplayer: lobby created; awaiting lobby entry callback";
+            LOG_INFO << LogStyle("Multiplayer") << "Steam multiplayer: lobby created; awaiting lobby entry callback";
             return;
         }
 
@@ -2354,7 +2347,6 @@ class SteamConnectionPlatform : public ConnectionPlatformInterface
 public:
     SteamConnectionPlatform()
     {
-        LOG_INFO << "Steam connection: constructor entered";
         // Load Steamworks only for clients that explicitly select the Steam provider.
 #ifdef WINDOWS
         const auto libraryName = sizeof(void*) == 8 ? "steam_api64.dll" : "steam_api.dll";
@@ -2366,7 +2358,6 @@ public:
 #else
         // Match a Steamworks runtime linked by a client application (e.g. Endeavor).
         // Also support Carbon's SDK packaging layout and developer dyld search paths.
-        LOG_INFO << "Steam connection: searching for macOS Steamworks runtime";
         if (!steamLibrary_.load("@executable_path/libsteam_api.dylib") &&
             !steamLibrary_.load("@executable_path/../Frameworks/libsteam_api.dylib") &&
             !steamLibrary_.load("libsteam_api.dylib"))
@@ -2375,8 +2366,7 @@ public:
             return;
         }
 #endif
-        LOG_INFO << "Steam connection: loaded " << steamLibrary_.getName();
-        LOG_INFO << "Steam connection: resolving lifecycle exports";
+        LOG_INFO << LogStyle("Multiplayer") << "Steam connection: loaded " << steamLibrary_.getName();
 
         initialize_ = steamLibrary_.mapFunction<InitializeFunction>("SteamAPI_InitFlat");
         shutdown_ = steamLibrary_.mapFunction<ShutdownFunction>("SteamAPI_Shutdown");
@@ -2406,10 +2396,9 @@ public:
             return;
 
         // SteamAPI_InitFlat expects a writable SteamErrMsg buffer, including on failure.
-        LOG_INFO << "Steam connection: lifecycle exports resolved; calling SteamAPI_InitFlat";
         char error[1024] = {};
         const auto initResult = initialize_(error);
-        LOG_INFO << "Steam connection: SteamAPI_InitFlat result " << initResult;
+        LOG_INFO << LogStyle("Multiplayer") << "Steam connection: SteamAPI_InitFlat result " << initResult;
         if (initResult != 0)
         {
             LOG_WARNING_WITHOUT_CALLER << "Steam connection initialization failed: " << error;
@@ -2418,10 +2407,9 @@ public:
 
         initialized_ = true;
         manualInit_();
-        LOG_INFO << "Steam connection: manual callback dispatch initialized";
 
         steamPipe_ = getPipe_();
-        LOG_INFO << "Steam connection: callback pipe " << steamPipe_;
+        LOG_INFO << LogStyle("Multiplayer") << "Steam connection: callback pipe " << steamPipe_;
         if (!steamPipe_)
         {
             LOG_WARNING_WITHOUT_CALLER << "Steam connection unavailable: callback pipe is invalid";
@@ -2441,7 +2429,7 @@ public:
         // Current-user stats are fetched automatically after SteamAPI_InitFlat succeeds.
         // Keep achievements pending until the UserStatsReceived_t callback confirms readiness.
         multiplayer_.initialize(steamLibrary_);
-        LOG_INFO << "Steam connection initialized; waiting for achievement cache readiness";
+        LOG_INFO << LogStyle("Multiplayer") << "Steam connection initialized; waiting for achievement cache readiness";
     }
 
     ~SteamConnectionPlatform() override
@@ -2452,7 +2440,7 @@ public:
             multiplayer_.shutdownSession();
             achievements_.flush(true);
             shutdown_();
-            LOG_INFO << "Steam connection shut down";
+            LOG_INFO << LogStyle("Multiplayer") << "Steam connection shut down";
         }
     }
 
@@ -2496,11 +2484,6 @@ public:
                 memcpy(&payloadSize, callback.data + 12, sizeof(payloadSize));
                 multiplayer_.onCallCompleted(steamPipe_, call, callbackID, payloadSize);
             }
-
-            // Track networking callbacks before attempting to interpret their layouts.
-            if (callback.callback >= 1200 && callback.callback < 1300)
-                LOG_INFO << "Steam P2P diagnostic: raw callback ID=" << callback.callback
-                         << " size=" << callback.size;
 
             // SteamNetConnectionStatusChangedCallback_t = 1221.
             if (callback.callback == 1221 && callback.data)
