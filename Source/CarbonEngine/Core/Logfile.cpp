@@ -137,9 +137,6 @@ Logfile::Logfile()
 {
     m = new Members;
 
-    // Built-in low-contrast style for routine connection-platform diagnostics (#B0B0B0).
-    setStyle("Multiplayer", Color(176.0f / 255.0f));
-
     if (!Enabled)
         return;
 
