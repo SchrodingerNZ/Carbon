@@ -274,6 +274,125 @@ public:
         return true;
     }
 };
+
+// Track manifest agreement independently of the provider's transport and identity type.
+// The provider validates incoming messages and calls these methods only after successful publication.
+template <typename MemberID>
+class SessionManifestAgreement
+{
+public:
+    uint64_t revision() const { return revision_; }
+    const std::string& manifest() const { return manifest_; }
+    size_t confirmationCount() const { return confirmedMembers_.size(); }
+    int requestedReadiness() const { return localReadyRequested_; }
+    uint64_t confirmedRevision() const { return confirmedRevision_; }
+
+    void publish(uint64_t revision, const std::string& manifest, const MemberID& localMember)
+    {
+        // Commit the new snapshot and invalidate confirmations of the previous one.
+        revision_ = revision;
+        manifest_ = manifest;
+        resetConfirmations(localMember);
+    }
+
+    void beginSynchronization(const MemberID& localMember)
+    {
+        // Require confirmations again for the locked phase, even at the same revision.
+        resetConfirmations(localMember);
+        readyMembers_.clear();
+        localReadyRequested_ = -1;
+        localReadySentRevision_ = 0;
+        localReadySentValue_ = -1;
+    }
+
+    bool confirmMember(const MemberID& member)
+    {
+        return confirmedMembers_.insert(member).second;
+    }
+
+    void setMemberReady(const MemberID& member, bool ready)
+    {
+        if (ready)
+            readyMembers_.insert(member);
+        else
+            readyMembers_.erase(member);
+    }
+
+    bool allMembersReady(const std::vector<MemberID>& members) const
+    {
+        if (members.empty())
+            return false;
+
+        // Every locked member must independently confirm the manifest and report readiness.
+        for (const auto& member : members)
+        {
+            if (confirmedMembers_.count(member) == 0 || readyMembers_.count(member) == 0)
+                return false;
+        }
+
+        return true;
+    }
+
+    bool hasLocalConfirmation(uint64_t revision, MultiplayerSessionState phase) const
+    {
+        return confirmedRevision_ == revision && confirmedPhase_ == phase;
+    }
+
+    void markLocalConfirmation(uint64_t revision, MultiplayerSessionState phase)
+    {
+        confirmedRevision_ = revision;
+        confirmedPhase_ = phase;
+    }
+
+    void requestLocalReadiness(bool ready)
+    {
+        localReadyRequested_ = ready ? 1 : 0;
+    }
+
+    bool hasPendingReadiness() const
+    {
+        // Only send readiness after submitting the locked-manifest confirmation.
+        return localReadyRequested_ >= 0 && confirmedPhase_ == MultiplayerSessionState::Syncing &&
+               confirmedRevision_ &&
+               !(localReadySentRevision_ == confirmedRevision_ && localReadySentValue_ == localReadyRequested_);
+    }
+
+    void markLocalReadinessSent(uint64_t revision)
+    {
+        localReadySentRevision_ = revision;
+        localReadySentValue_ = localReadyRequested_;
+    }
+
+    void clear()
+    {
+        manifest_.clear();
+        revision_ = 0;
+        confirmedRevision_ = 0;
+        confirmedMembers_.clear();
+        readyMembers_.clear();
+        localReadyRequested_ = -1;
+        localReadySentRevision_ = 0;
+        localReadySentValue_ = -1;
+        confirmedPhase_ = MultiplayerSessionState::None;
+    }
+
+private:
+    void resetConfirmations(const MemberID& localMember)
+    {
+        confirmedMembers_.clear();
+        confirmedMembers_.insert(localMember);
+    }
+
+    uint64_t revision_ = 0;
+    uint64_t confirmedRevision_ = 0;
+    std::string manifest_;
+    std::set<MemberID> confirmedMembers_;
+    std::set<MemberID> readyMembers_;
+    int localReadyRequested_ = -1;
+    uint64_t localReadySentRevision_ = 0;
+    int localReadySentValue_ = -1;
+    MultiplayerSessionState confirmedPhase_ = MultiplayerSessionState::None;
+};
 }
 
 #if defined(WINDOWS) || defined(MACOS)
@@ -858,17 +977,17 @@ public:
 
         const auto manifest = SessionManifestCodec::appendSessionMetadata(
             buildManifest(members), metadata ? *metadata : getSession().getMetadata());
-        if (manifest.size() + std::to_string(manifestRevision_ + 1).size() + 1 > 4096)
+        if (manifest.size() + std::to_string(manifestAgreement_.revision() + 1).size() + 1 > 4096)
         {
             LOG_WARNING_WITHOUT_CALLER << "Steam multiplayer: player manifest exceeds lobby-message limit";
             return false;
         }
-        if (manifest == publishedManifest_)
+        if (manifest == manifestAgreement_.manifest())
             return true;
 
         // Publish revision and manifest atomically through one Steam lobby-data key.
         // Failed writes leave the previously committed snapshot and confirmations intact.
-        const auto nextRevision = manifestRevision_ + 1;
+        const auto nextRevision = manifestAgreement_.revision() + 1;
         const auto snapshot = std::to_string(nextRevision) + "|" + manifest;
         if (!setLobbyData_(matchmaking_, lobbyID_, "carbon_manifest_snapshot", snapshot.c_str()))
         {
@@ -876,12 +995,9 @@ public:
             return false;
         }
 
-        manifestRevision_ = nextRevision;
-        publishedManifest_ = manifest;
-        confirmedMembers_.clear();
-        confirmedMembers_.insert(localSteamID_);
-        announceManifestRevision(manifestRevision_);
-        LOG_INFO << "Steam multiplayer: ManifestUpdated revision " << manifestRevision_
+        manifestAgreement_.publish(nextRevision, manifest, localSteamID_);
+        announceManifestRevision(manifestAgreement_.revision());
+        LOG_INFO << "Steam multiplayer: ManifestUpdated revision " << manifestAgreement_.revision()
                  << ", members=" << members.size();
         return true;
     }
@@ -960,7 +1076,7 @@ public:
         }
 
         // Re-send if the revision changed or the synchronization phase was entered.
-        if (confirmedRevision_ == revision && confirmedPhase_ == sessionState_)
+        if (manifestAgreement_.hasLocalConfirmation(revision, sessionState_))
             return;
 
         const auto phase = sessionState_ == MultiplayerSessionState::Syncing ? "S" : "L";
@@ -968,8 +1084,7 @@ public:
                              std::to_string(revision) + "|" + localManifest;
         if (sendLobbyChat_ && sendLobbyChat_(matchmaking_, lobbyID_, message.data(), int(message.size())))
         {
-            confirmedRevision_ = revision;
-            confirmedPhase_ = sessionState_;
+            manifestAgreement_.markLocalConfirmation(revision, sessionState_);
             LOG_INFO << "Steam multiplayer: ManifestConfirm sent for revision " << revision;
         }
     }
@@ -981,11 +1096,8 @@ public:
             getLobbyOwner_(matchmaking_, lobbyID_) != localSteamID_ || frozenSteamMembers_.empty())
             return;
 
-        for (const auto steamID : frozenSteamMembers_)
-        {
-            if (confirmedMembers_.count(steamID) == 0 || readyMembers_.count(steamID) == 0)
-                return;
-        }
+        if (!manifestAgreement_.allMembersReady(frozenSteamMembers_))
+            return;
 
         // Publish the phase and frozen roster together. Never expose Playing
         // without the same authoritative members and manifest revision.
@@ -997,7 +1109,7 @@ public:
             roster += std::to_string(steamID);
         }
 
-        const auto snapshot = std::string("P|") + std::to_string(manifestRevision_) + "|" + roster;
+        const auto snapshot = std::string("P|") + std::to_string(manifestAgreement_.revision()) + "|" + roster;
         if (!setLobbyData_(matchmaking_, lobbyID_, "carbon_session_start", snapshot.c_str()))
         {
             LOG_WARNING_WITHOUT_CALLER << "Steam multiplayer: failed to publish Playing phase";
@@ -1015,7 +1127,7 @@ public:
         if (generation != sessionGeneration_ || sessionState_ != MultiplayerSessionState::Playing)
             return;
 
-        const auto message = std::string("CARBON_BEGIN_PLAYING|") + std::to_string(manifestRevision_);
+        const auto message = std::string("CARBON_BEGIN_PLAYING|") + std::to_string(manifestAgreement_.revision());
         if (sendLobbyChat_)
             sendLobbyChat_(matchmaking_, lobbyID_, message.data(), int(message.size()));
 
@@ -1026,24 +1138,21 @@ public:
     // Still defer outgoing readiness until our locked-manifest confirmation is submitted.
     void sendPendingReadiness()
     {
-        if (sessionState_ != MultiplayerSessionState::Syncing || localReadyRequested_ < 0 ||
-            getLobbyOwner_(matchmaking_, lobbyID_) == localSteamID_ ||
-            confirmedPhase_ != MultiplayerSessionState::Syncing || !confirmedRevision_ ||
-            (localReadySentRevision_ == confirmedRevision_ && localReadySentValue_ == localReadyRequested_))
+        if (sessionState_ != MultiplayerSessionState::Syncing || manifestAgreement_.requestedReadiness() < 0 ||
+            getLobbyOwner_(matchmaking_, lobbyID_) == localSteamID_ || !manifestAgreement_.hasPendingReadiness())
             return;
 
         uint64_t revision = 0;
         std::string manifest;
-        if (!readManifestSnapshot(revision, manifest) || revision != confirmedRevision_)
+        if (!readManifestSnapshot(revision, manifest) || revision != manifestAgreement_.confirmedRevision())
             return;
 
         const auto message = std::string("CARBON_PLAYER_READY|") + std::to_string(revision) +
-                             "|" + (localReadyRequested_ ? "1" : "0");
+                             "|" + (manifestAgreement_.requestedReadiness() ? "1" : "0");
         if (sendLobbyChat_ && sendLobbyChat_(matchmaking_, lobbyID_, message.data(), int(message.size())))
         {
-            localReadySentRevision_ = revision;
-            localReadySentValue_ = localReadyRequested_;
-            LOG_INFO << "Steam multiplayer: PlayerReady " << localReadyRequested_ << " sent for revision " << revision;
+            manifestAgreement_.markLocalReadinessSent(revision);
+            LOG_INFO << "Steam multiplayer: PlayerReady " << manifestAgreement_.requestedReadiness() << " sent for revision " << revision;
         }
     }
 
@@ -1056,15 +1165,12 @@ public:
         // The host's own readiness is tracked by the same barrier as remote clients.
         if (getLobbyOwner_(matchmaking_, lobbyID_) == localSteamID_)
         {
-            if (ready)
-                readyMembers_.insert(localSteamID_);
-            else
-                readyMembers_.erase(localSteamID_);
+            manifestAgreement_.setMemberReady(localSteamID_, ready);
             beginPlayingIfReady();
             return true;
         }
 
-        localReadyRequested_ = ready ? 1 : 0;
+        manifestAgreement_.requestLocalReadiness(ready);
         sendPendingReadiness();
         return true;
     }
@@ -1116,16 +1222,14 @@ public:
             const auto number = message.substr(readyPrefix.size(), separator - readyPrefix.size());
             char* end = nullptr;
             const auto revision = std::strtoull(number.c_str(), &end, 10);
-            if (!revision || !end || *end || revision != manifestRevision_)
+            if (!revision || !end || *end || revision != manifestAgreement_.revision())
                 return;
 
             const auto value = message.substr(separator + 1);
-            if (value == "1")
-                readyMembers_.insert(sender);
-            else if (value == "0")
-                readyMembers_.erase(sender);
-            else
+            if (value != "1" && value != "0")
                 return;
+
+            manifestAgreement_.setMemberReady(sender, value == "1");
 
             LOG_INFO << "Steam multiplayer: PlayerReady " << value.c_str() << " from " << sender;
             beginPlayingIfReady();
@@ -1162,11 +1266,11 @@ public:
         const auto number = message.substr(phaseSeparator + 1, separator - phaseSeparator - 1);
         char* end = nullptr;
         const auto revision = std::strtoull(number.c_str(), &end, 10);
-        if (!revision || !end || *end || revision != manifestRevision_)
+        if (!revision || !end || *end || revision != manifestAgreement_.revision())
             return;
 
         // Only members of the host's committed roster may confirm it.
-        if (message.substr(separator + 1) != publishedManifest_ ||
+        if (message.substr(separator + 1) != manifestAgreement_.manifest() ||
             localPlayerIDs_.find(sender) == localPlayerIDs_.end() ||
             (sessionState_ == MultiplayerSessionState::Syncing &&
              std::find(frozenSteamMembers_.begin(), frozenSteamMembers_.end(), sender) == frozenSteamMembers_.end()))
@@ -1175,12 +1279,12 @@ public:
             return;
         }
 
-        if (confirmedMembers_.insert(sender).second)
+        if (manifestAgreement_.confirmMember(sender))
         {
             LOG_INFO << "Steam multiplayer: ManifestConfirm accepted from " << sender
                      << " for revision " << revision;
             if (sessionState_ == MultiplayerSessionState::Syncing &&
-                confirmedMembers_.size() == frozenSteamMembers_.size())
+                manifestAgreement_.confirmationCount() == frozenSteamMembers_.size())
                 LOG_INFO << "Steam multiplayer: all locked members confirmed manifest revision " << revision;
             beginPlayingIfReady();
         }
@@ -1216,13 +1320,13 @@ public:
 
         // Lock only the exact current published snapshot; failed metadata publication cannot start a game.
         publishManifest();
-        if (!manifestRevision_ || publishedManifest_ !=
+        if (!manifestAgreement_.revision() || manifestAgreement_.manifest() !=
             SessionManifestCodec::appendSessionMetadata(buildManifest(ordered), getSession().getMetadata()))
             return false;
 
         // The frozen roster, phase and manifest revision form one lobby-data
         // snapshot. A failed write leaves the lobby in its previous phase.
-        const auto startSnapshot = std::string("S|") + std::to_string(manifestRevision_) + "|" + publishedRoster;
+        const auto startSnapshot = std::string("S|") + std::to_string(manifestAgreement_.revision()) + "|" + publishedRoster;
         if (!setLobbyData_(matchmaking_, lobbyID_, "carbon_session_start", startSnapshot.c_str()))
             return false;
 
@@ -1234,14 +1338,9 @@ public:
             LOG_WARNING_WITHOUT_CALLER << "Steam multiplayer: unable to close the lobby to new members";
 
         sessionState_ = MultiplayerSessionState::Syncing;
-        confirmedMembers_.clear();
-        confirmedMembers_.insert(localSteamID_);
-        readyMembers_.clear();
-        localReadyRequested_ = -1;
-        localReadySentRevision_ = 0;
-        localReadySentValue_ = -1;
+        manifestAgreement_.beginSynchronization(localSteamID_);
         updateSessionRegistry();
-        announceManifestRevision(manifestRevision_);
+        announceManifestRevision(manifestAgreement_.revision());
         LOG_INFO << "Steam multiplayer: session player roster locked for synchronization";
         return true;
     }
@@ -1449,8 +1548,7 @@ public:
             if (snapshot[0] == 'P')
             {
                 if (hostSteamID == localSteamID_ ||
-                    (confirmedRevision_ == startRevision &&
-                     confirmedPhase_ == MultiplayerSessionState::Syncing))
+                    manifestAgreement_.hasLocalConfirmation(startRevision, MultiplayerSessionState::Syncing))
                     sessionState_ = MultiplayerSessionState::Playing;
             }
             else if (sessionState_ != MultiplayerSessionState::Playing)
@@ -1609,9 +1707,9 @@ public:
         {
             uint64_t revision = 0;
             std::string manifest;
-            const bool manifestConfirmed = readManifestSnapshot(revision, manifest) && confirmedRevision_ &&
-                                           revision == confirmedRevision_ &&
-                                           confirmedPhase_ == MultiplayerSessionState::Syncing;
+            const bool manifestConfirmed = readManifestSnapshot(revision, manifest) &&
+                                           manifestAgreement_.confirmedRevision() &&
+                                           manifestAgreement_.hasLocalConfirmation(revision, MultiplayerSessionState::Syncing);
 
             // If a manifest is incomplete, stay publicly in Lobby and retry next update.
             if (manifestConfirmed)
@@ -1992,15 +2090,7 @@ public:
         localPlayerIDs_.clear();
         steamByPlayerID_.clear();
         frozenSteamMembers_.clear();
-        publishedManifest_.clear();
-        manifestRevision_ = 0;
-        confirmedRevision_ = 0;
-        confirmedMembers_.clear();
-        readyMembers_.clear();
-        localReadyRequested_ = -1;
-        localReadySentRevision_ = 0;
-        localReadySentValue_ = -1;
-        confirmedPhase_ = MultiplayerSessionState::None;
+        manifestAgreement_.clear();
         nextPlayerID_ = 1;
         localSteamID_ = steamUser_ && getSteamID_ ? getSteamID_(steamUser_) : 0;
         // Preserve the completed session's identity and outcome for the application.
@@ -2331,15 +2421,7 @@ private:
     uint32_t nextPlayerID_ = 1;
     MultiplayerSessionMetadata stagedMetadata_;
     bool metadataDirty_ = false;
-    uint64_t manifestRevision_ = 0;
-    uint64_t confirmedRevision_ = 0;
-    std::string publishedManifest_;
-    std::set<uint64_t> confirmedMembers_;
-    std::set<uint64_t> readyMembers_;
-    int localReadyRequested_ = -1;
-    uint64_t localReadySentRevision_ = 0;
-    int localReadySentValue_ = -1;
-    MultiplayerSessionState confirmedPhase_ = MultiplayerSessionState::None;
+    SessionManifestAgreement<uint64_t> manifestAgreement_;
     MultiplayerSessionState sessionState_ = MultiplayerSessionState::None;
 };
 
