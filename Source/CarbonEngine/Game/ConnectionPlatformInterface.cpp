@@ -1317,56 +1317,10 @@ public:
         Vector<MultiplayerPlayer> roster;
         for (const auto& entry : orderedRoster)
             roster.append(entry.second);
-        sessionController_.registry().setDestinations(destinations);
 
         auto& session = mutableSession();
-
-        // Log only registry changes, not every per-frame Steam membership poll.
-        bool rosterChanged = session.getID() != lobbyID_ ||
-                             session.getHostPlayerID() != hostID ||
-                             session.getLocalPlayerID() != localID ||
-                             session.getPlayerCount() != roster.size();
-        if (!rosterChanged)
-        {
-            for (unsigned int index = 0; index < roster.size(); ++index)
-            {
-                const auto existing = session.getPlayer(index);
-                if (!existing || existing->getID() != roster[index].getID() ||
-                    existing->getName() != roster[index].getName())
-                {
-                    rosterChanged = true;
-                    break;
-                }
-            }
-        }
-
-        // Record transitions only for participants already present in the public roster.
-        // New participants are announced by MultiplayerSessionUpdatedEvent instead.
-        struct ConnectionTransition
-        {
-            PlayerID playerID;
-            MultiplayerConnectionState previous;
-            MultiplayerConnectionState current;
-        };
-        std::vector<ConnectionTransition> connectionChanges;
-        for (const auto& player : roster)
-        {
-            const auto* existing = session.getPlayer(player.getID());
-            if (existing && existing->getConnectionState() != player.getConnectionState())
-            {
-                connectionChanges.push_back({player.getID(), existing->getConnectionState(),
-                                             player.getConnectionState()});
-            }
-        }
-
-        const auto previousState = session.getState();
-
-        // Guests must validate the frozen manifest before exposing the Syncing transition.
-        // Keep the previous public state while Carbon reconstructs and confirms metadata.
-        const bool enteringGuestSync = !isHost && sessionController_.state() == MultiplayerSessionState::Syncing &&
-                                       previousState != MultiplayerSessionState::Syncing;
-        session.setIdentity(lobbyID_, enteringGuestSync ? previousState : sessionController_.state(), hostID, localID);
-        session.setPlayers(roster);
+        const auto reconciliation = sessionController_.reconcileRoster(session, lobbyID_, isHost, hostID, localID,
+                                                                      roster, destinations);
 
         // Publish and validate the full registry before notifying application handlers.
         const auto generation = sessionController_.generation();
@@ -1377,7 +1331,7 @@ public:
         if (generation != sessionController_.generation() || lobbyID_ == 0)
             return;
 
-        if (enteringGuestSync)
+        if (reconciliation.enteringGuestSync)
         {
             uint64_t revision = 0;
             std::string manifest;
@@ -1391,29 +1345,20 @@ public:
         }
 
         // The application can now read the validated metadata in its Syncing handler.
-        const auto reconciledState = sessionController_.state();
-        dispatchSessionStateChanged(previousState);
-        if (generation != sessionController_.generation() || sessionController_.state() != reconciledState)
+        if (!sessionController_.dispatchRosterEvents(
+                reconciliation, generation,
+                [this](MultiplayerSessionState previous) { dispatchSessionStateChanged(previous); },
+                [this]() { dispatchSessionUpdated(); },
+                [this](PlayerID player, MultiplayerConnectionState previous, MultiplayerConnectionState current)
+                {
+                    dispatchPlayerConnectionStateChanged(player, previous, current);
+                }))
             return;
-
-        // Notify after replacing the full registry, not for repeated Steam polling.
-        if (rosterChanged)
-            dispatchSessionUpdated();
-        if (generation != sessionController_.generation() || sessionController_.state() != reconciledState)
-            return;
-
-        // Dispatch connection events only while this exact session is active.
-        for (const auto& change : connectionChanges)
-        {
-            dispatchPlayerConnectionStateChanged(change.playerID, change.previous, change.current);
-            if (generation != sessionController_.generation() || sessionController_.state() != reconciledState)
-                return;
-        }
 
         sendPendingReadiness();
         beginPlayingIfReady();
 
-        if (rosterChanged)
+        if (reconciliation.rosterChanged)
         {
             LOG_INFO << "Carbon multiplayer: session " << lobbyID_ << " registry has " << roster.size()
                      << " players (local=" << localID.getValue() << ", host=" << hostID.getValue() << ")";

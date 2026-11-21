@@ -247,6 +247,98 @@ public:
         return ManifestValidation::Valid;
     }
 
+    struct ConnectionTransition
+    {
+        PlayerID playerID;
+        MultiplayerConnectionState previous;
+        MultiplayerConnectionState current;
+    };
+
+    struct RosterReconciliation
+    {
+        bool rosterChanged = false;
+        bool enteringGuestSync = false;
+        MultiplayerSessionState previousState = MultiplayerSessionState::None;
+        std::vector<ConnectionTransition> connectionChanges;
+    };
+
+    // Commit the complete roster before the provider publishes or confirms its manifest.
+    RosterReconciliation reconcileRoster(MultiplayerSession& session, uint64_t sessionID, bool isHost,
+                                         PlayerID hostID, PlayerID localID, const Vector<MultiplayerPlayer>& roster,
+                                         const typename SessionPlayerRegistry<MemberID>::DestinationMap& destinations)
+    {
+        RosterReconciliation result;
+        registry_.setDestinations(destinations);
+
+        // Membership changes are independent of transport connectivity.
+        result.rosterChanged = session.getID() != sessionID ||
+                               session.getHostPlayerID() != hostID ||
+                               session.getLocalPlayerID() != localID ||
+                               session.getPlayerCount() != roster.size();
+        if (!result.rosterChanged)
+        {
+            for (unsigned int index = 0; index < roster.size(); ++index)
+            {
+                const auto existing = session.getPlayer(index);
+                if (!existing || existing->getID() != roster[index].getID() ||
+                    existing->getName() != roster[index].getName())
+                {
+                    result.rosterChanged = true;
+                    break;
+                }
+            }
+        }
+
+        // Record transitions only for participants already present in the public roster.
+        // New participants are announced by MultiplayerSessionUpdatedEvent instead.
+        for (const auto& player : roster)
+        {
+            const auto* existing = session.getPlayer(player.getID());
+            if (existing && existing->getConnectionState() != player.getConnectionState())
+            {
+                result.connectionChanges.push_back({player.getID(), existing->getConnectionState(),
+                                                    player.getConnectionState()});
+            }
+        }
+
+        result.previousState = session.getState();
+
+        // Guests must validate the frozen manifest before exposing the Syncing transition.
+        // Keep the previous public state while Carbon reconstructs and confirms metadata.
+        result.enteringGuestSync = !isHost && state() == MultiplayerSessionState::Syncing &&
+                                   result.previousState != MultiplayerSessionState::Syncing;
+        session.setIdentity(sessionID, result.enteringGuestSync ? result.previousState : state(), hostID, localID);
+        session.setPlayers(roster);
+
+        return result;
+    }
+
+    // Dispatch the reconciled snapshot in Carbon order, stopping if an application callback
+    // ends or replaces the session, or changes the protocol phase.
+    template <typename StateChanged, typename Updated, typename ConnectionChanged>
+    bool dispatchRosterEvents(const RosterReconciliation& result, uint64_t generation,
+                              StateChanged stateChanged, Updated updated, ConnectionChanged connectionChanged) const
+    {
+        const auto reconciledState = state();
+        stateChanged(result.previousState);
+        if (generation != this->generation() || state() != reconciledState)
+            return false;
+
+        if (result.rosterChanged)
+            updated();
+        if (generation != this->generation() || state() != reconciledState)
+            return false;
+
+        for (const auto& change : result.connectionChanges)
+        {
+            connectionChanged(change.playerID, change.previous, change.current);
+            if (generation != this->generation() || state() != reconciledState)
+                return false;
+        }
+
+        return true;
+    }
+
     bool metadataDirty() const { return metadataDirty_; }
     const MultiplayerSessionMetadata& stagedMetadata() const { return stagedMetadata_; }
 
@@ -309,7 +401,7 @@ public:
     {
         // Retain the identity of the ended session for application inspection.
         const EndedSession ended = {session.getState(), session.getID(),
-                                    session.getPlayerCount() != 0 || !session.getMetadata().empty()};
+                                      session.getPlayerCount() != 0 || !session.getMetadata().empty()};
         const auto previousHost = session.getHostPlayerID();
         const auto previousLocal = session.getLocalPlayerID();
         session.clear();
