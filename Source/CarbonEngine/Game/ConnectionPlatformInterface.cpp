@@ -8,6 +8,8 @@
 #include "CarbonEngine/Game/MultiplayerEvents.h"
 #include "CarbonEngine/Core/SharedLibrary.h"
 #include "CarbonEngine/Game/ConnectionPlatformInterface.h"
+#include "CarbonEngine/Game/SessionManifestCodec.hpp"
+#include "CarbonEngine/Game/SessionController.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -121,429 +123,6 @@ private:
 
 // The Null provider remains the default even when an optional native provider is registered.
 CARBON_REGISTER_INTERFACE_IMPLEMENTATION(ConnectionPlatformInterface, NullConnectionPlatform, 1)
-
-// Provider-independent manifest encoding and metadata validation. Keep the existing wire format
-// and limits so extracting the protocol does not change Steam session compatibility.
-namespace
-{
-class SessionManifestCodec
-{
-public:
-    // Convert arbitrary player-name bytes to a delimiter-safe, canonical form.
-    static std::string encodeManifestName(const std::string& name)
-    {
-        static const char digits[] = "0123456789ABCDEF";
-        std::string result;
-        for (const auto character : name)
-        {
-            const auto value = static_cast<unsigned char>(character);
-            result += digits[value >> 4];
-            result += digits[value & 15];
-        }
-        return result;
-    }
-
-    // Encode the complete metadata collection into the same canonical manifest as the roster.
-    // Hex encoding preserves arbitrary value bytes without introducing ambiguous delimiters.
-    static std::string encodeSessionMetadata(const MultiplayerSessionMetadata& metadata)
-    {
-        std::string encoded;
-        for (const auto& entry : metadata)
-        {
-            if (!encoded.empty())
-                encoded += ";";
-
-            encoded += encodeManifestName(std::string(entry.first.cStr(), entry.first.length()));
-            encoded += ":";
-            encoded += encodeManifestName(std::string(entry.second.cStr(), entry.second.length()));
-        }
-        return encoded;
-    }
-
-    // Reject noncanonical or malformed data, and retain exact key/value bytes.
-    static bool decodeSessionMetadata(const std::string& encoded, MultiplayerSessionMetadata& result)
-    {
-        MultiplayerSessionMetadata parsed;
-        if (encoded.empty())
-        {
-            result.clear();
-            return true;
-        }
-
-        const auto hexValue = [](char c) -> int
-        {
-            if (c >= '0' && c <= '9') return c - '0';
-            if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-            return -1;
-        };
-
-        const auto decode = [&](const std::string& source, std::string& destination) -> bool
-        {
-            if (source.size() % 2)
-                return false;
-
-            destination.clear();
-            for (size_t index = 0; index < source.size(); index += 2)
-            {
-                const auto high = hexValue(source[index]);
-                const auto low = hexValue(source[index + 1]);
-                if (high < 0 || low < 0)
-                    return false;
-                destination += char((high << 4) | low);
-            }
-            return true;
-        };
-
-        size_t begin = 0;
-        while (begin < encoded.size())
-        {
-            const auto end = encoded.find(';', begin);
-            const auto item = encoded.substr(begin, end == std::string::npos ? end : end - begin);
-            const auto separator = item.find(':');
-            if (separator == std::string::npos || item.find(':', separator + 1) != std::string::npos)
-                return false;
-
-            std::string key, value;
-            if (!decode(item.substr(0, separator), key) || !decode(item.substr(separator + 1), value))
-                return false;
-
-            const String metadataKey(key.c_str());
-            const String metadataValue(value.c_str());
-            if (!validMetadataKey(metadataKey) || value.find('\0') != std::string::npos ||
-                !parsed.insert({metadataKey, metadataValue}).second)
-                return false;
-
-            if (end == std::string::npos)
-                break;
-            begin = end + 1;
-            if (begin == encoded.size())
-                return false;
-        }
-
-        if (!validMetadata(parsed) || encodeSessionMetadata(parsed) != encoded)
-            return false;
-
-        result = parsed;
-        return true;
-    }
-
-    // Version marker separates the existing roster format from generic session properties.
-    static std::string appendSessionMetadata(const std::string& roster, const MultiplayerSessionMetadata& metadata)
-    {
-        return roster + "|M1|" + encodeSessionMetadata(metadata);
-    }
-
-    // Keep session metadata within the existing Carbon manifest budget.
-    static bool validMetadataKey(const String& key)
-    {
-        if (key.length() == 0 || key.length() > 64)
-            return false;
-
-        for (unsigned int index = 0; index < key.length(); ++index)
-        {
-            const auto c = key.cStr()[index];
-            if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-                  (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-'))
-                return false;
-        }
-        return true;
-    }
-
-    static bool validMetadata(const MultiplayerSessionMetadata& metadata)
-    {
-        if (metadata.size() > 64)
-            return false;
-
-        size_t bytes = 0;
-        for (const auto& entry : metadata)
-        {
-            if (!validMetadataKey(entry.first) || entry.second.length() > 256)
-                return false;
-
-            // Reserve serialization overhead; the provider checks the final manifest size.
-            bytes += entry.first.length() + entry.second.length() + 12;
-            if (bytes > 2048)
-                return false;
-
-            for (unsigned int index = 0; index < entry.second.length(); ++index)
-            {
-                if (entry.second.cStr()[index] == '\0')
-                    return false;
-            }
-        }
-        return true;
-    }
-};
-
-// Track manifest agreement independently of the provider's transport and identity type.
-// The provider validates incoming messages and calls these methods only after successful publication.
-template <typename MemberID>
-class SessionManifestAgreement
-{
-public:
-    uint64_t revision() const { return revision_; }
-    const std::string& manifest() const { return manifest_; }
-    size_t confirmationCount() const { return confirmedMembers_.size(); }
-    int requestedReadiness() const { return localReadyRequested_; }
-    uint64_t confirmedRevision() const { return confirmedRevision_; }
-
-    void publish(uint64_t revision, const std::string& manifest, const MemberID& localMember)
-    {
-        // Commit the new snapshot and invalidate confirmations of the previous one.
-        revision_ = revision;
-        manifest_ = manifest;
-        resetConfirmations(localMember);
-    }
-
-    void beginSynchronization(const MemberID& localMember)
-    {
-        // Require confirmations again for the locked phase, even at the same revision.
-        resetConfirmations(localMember);
-        readyMembers_.clear();
-        localReadyRequested_ = -1;
-        localReadySentRevision_ = 0;
-        localReadySentValue_ = -1;
-    }
-
-    bool confirmMember(const MemberID& member)
-    {
-        return confirmedMembers_.insert(member).second;
-    }
-
-    void setMemberReady(const MemberID& member, bool ready)
-    {
-        if (ready)
-            readyMembers_.insert(member);
-        else
-            readyMembers_.erase(member);
-    }
-
-    bool allMembersReady(const std::vector<MemberID>& members) const
-    {
-        if (members.empty())
-            return false;
-
-        // Every locked member must independently confirm the manifest and report readiness.
-        for (const auto& member : members)
-        {
-            if (confirmedMembers_.count(member) == 0 || readyMembers_.count(member) == 0)
-                return false;
-        }
-
-        return true;
-    }
-
-    bool hasLocalConfirmation(uint64_t revision, MultiplayerSessionState phase) const
-    {
-        return confirmedRevision_ == revision && confirmedPhase_ == phase;
-    }
-
-    void markLocalConfirmation(uint64_t revision, MultiplayerSessionState phase)
-    {
-        confirmedRevision_ = revision;
-        confirmedPhase_ = phase;
-    }
-
-    void requestLocalReadiness(bool ready)
-    {
-        localReadyRequested_ = ready ? 1 : 0;
-    }
-
-    bool hasPendingReadiness() const
-    {
-        // Only send readiness after submitting the locked-manifest confirmation.
-        return localReadyRequested_ >= 0 && confirmedPhase_ == MultiplayerSessionState::Syncing &&
-               confirmedRevision_ &&
-               !(localReadySentRevision_ == confirmedRevision_ && localReadySentValue_ == localReadyRequested_);
-    }
-
-    void markLocalReadinessSent(uint64_t revision)
-    {
-        localReadySentRevision_ = revision;
-        localReadySentValue_ = localReadyRequested_;
-    }
-
-    void clear()
-    {
-        manifest_.clear();
-        revision_ = 0;
-        confirmedRevision_ = 0;
-        confirmedMembers_.clear();
-        readyMembers_.clear();
-        localReadyRequested_ = -1;
-        localReadySentRevision_ = 0;
-        localReadySentValue_ = -1;
-        confirmedPhase_ = MultiplayerSessionState::None;
-    }
-
-private:
-    void resetConfirmations(const MemberID& localMember)
-    {
-        confirmedMembers_.clear();
-        confirmedMembers_.insert(localMember);
-    }
-
-    uint64_t revision_ = 0;
-    uint64_t confirmedRevision_ = 0;
-    std::string manifest_;
-    std::set<MemberID> confirmedMembers_;
-    std::set<MemberID> readyMembers_;
-    int localReadyRequested_ = -1;
-    uint64_t localReadySentRevision_ = 0;
-    int localReadySentValue_ = -1;
-    MultiplayerSessionState confirmedPhase_ = MultiplayerSessionState::None;
-};
-// Keep host assignments separate from the currently published routing table.
-// A member can leave the roster without losing its original host-assigned ID.
-template <typename MemberID>
-class SessionPlayerRegistry
-{
-public:
-    typedef std::map<MemberID, uint32_t> AssignmentMap;
-    typedef std::map<uint32_t, MemberID> DestinationMap;
-
-    const AssignmentMap& assignments() const { return assignments_; }
-    const DestinationMap& destinations() const { return destinations_; }
-
-    uint32_t assign(const MemberID& member)
-    {
-        // Reuse existing IDs; new IDs are allocated in host-observed join order.
-        const auto found = assignments_.find(member);
-        if (found != assignments_.end())
-            return found->second;
-
-        const auto id = nextPlayerID_++;
-        assignments_.insert({member, id});
-        return id;
-    }
-
-    void setDestinations(const DestinationMap& destinations)
-    {
-        destinations_ = destinations;
-    }
-
-    void clear()
-    {
-        assignments_.clear();
-        destinations_.clear();
-        nextPlayerID_ = 1;
-    }
-
-private:
-    AssignmentMap assignments_;
-    DestinationMap destinations_;
-    uint32_t nextPlayerID_ = 1;
-};
-
-// Own the Carbon protocol state independently of platform callbacks and transport.
-// Providers retain responsibility for validating and publishing transitions before committing them.
-template <typename MemberID>
-class SessionController
-{
-public:
-    struct EndedSession
-    {
-        MultiplayerSessionState previousState;
-        uint64_t previousID;
-        bool hadPlayers;
-    };
-
-    MultiplayerSessionState state() const { return state_; }
-    uint64_t generation() const { return generation_; }
-    void invalidateGeneration() { ++generation_; }
-
-    SessionPlayerRegistry<MemberID>& registry() { return registry_; }
-    const SessionPlayerRegistry<MemberID>& registry() const { return registry_; }
-    SessionManifestAgreement<MemberID>& agreement() { return agreement_; }
-    const SessionManifestAgreement<MemberID>& agreement() const { return agreement_; }
-    std::vector<MemberID>& frozenMembers() { return frozenMembers_; }
-    const std::vector<MemberID>& frozenMembers() const { return frozenMembers_; }
-
-    bool metadataDirty() const { return metadataDirty_; }
-    const MultiplayerSessionMetadata& stagedMetadata() const { return stagedMetadata_; }
-
-    void stageMetadata(const MultiplayerSessionMetadata& metadata)
-    {
-        stagedMetadata_ = metadata;
-        metadataDirty_ = true;
-    }
-
-    void discardMetadata()
-    {
-        stagedMetadata_.clear();
-        metadataDirty_ = false;
-    }
-
-    void clearParticipants()
-    {
-        registry_.clear();
-        frozenMembers_.clear();
-        agreement_.clear();
-    }
-
-    MultiplayerSessionState enterLobby(MultiplayerSession& session, uint64_t id)
-    {
-        // Prepare the public snapshot before any application event is dispatched.
-        const auto previous = session.getState();
-        state_ = MultiplayerSessionState::Lobby;
-        session.clear();
-        session.setIdentity(id, state_, PlayerID(), PlayerID());
-        return previous;
-    }
-
-    void beginSynchronization(const MemberID& localMember)
-    {
-        state_ = MultiplayerSessionState::Syncing;
-        agreement_.beginSynchronization(localMember);
-    }
-
-    void acceptPublishedPhase(bool playing, uint64_t revision, bool isLocalHost)
-    {
-        // A guest may accept Playing only after confirming the frozen manifest.
-        if (playing)
-        {
-            if (isLocalHost || agreement_.hasLocalConfirmation(revision, MultiplayerSessionState::Syncing))
-                state_ = MultiplayerSessionState::Playing;
-        }
-        else if (state_ != MultiplayerSessionState::Playing)
-            state_ = MultiplayerSessionState::Syncing;
-    }
-
-    MultiplayerSessionState enterPlaying(MultiplayerSession& session, uint64_t id)
-    {
-        const auto previous = session.getState();
-        state_ = MultiplayerSessionState::Playing;
-        session.setIdentity(id, state_, session.getHostPlayerID(), session.getLocalPlayerID());
-        return previous;
-    }
-
-    EndedSession finishSession(MultiplayerSession& session)
-    {
-        // Retain the identity of the ended session for application inspection.
-        const EndedSession ended = {session.getState(), session.getID(),
-                                    session.getPlayerCount() != 0 || !session.getMetadata().empty()};
-        const auto previousHost = session.getHostPlayerID();
-        const auto previousLocal = session.getLocalPlayerID();
-        session.clear();
-
-        state_ = ended.previousState == MultiplayerSessionState::None
-                     ? MultiplayerSessionState::None : MultiplayerSessionState::Ended;
-        if (state_ == MultiplayerSessionState::Ended)
-            session.setIdentity(ended.previousID, state_, previousHost, previousLocal);
-
-        return ended;
-    }
-
-private:
-    SessionPlayerRegistry<MemberID> registry_;
-    SessionManifestAgreement<MemberID> agreement_;
-    std::vector<MemberID> frozenMembers_;
-    MultiplayerSessionMetadata stagedMetadata_;
-    bool metadataDirty_ = false;
-    MultiplayerSessionState state_ = MultiplayerSessionState::None;
-    uint64_t generation_ = 0;
-};
-}
 
 #if defined(WINDOWS) || defined(MACOS)
 
@@ -1062,7 +641,7 @@ public:
                 result += ";";
 
             result += std::to_string(member.first) + ":" + std::to_string(member.second) + ":" +
-                      SessionManifestCodec::encodeManifestName(getManifestPlayerName(member.second));
+                      SessionDetail::SessionManifestCodec::encodeManifestName(getManifestPlayerName(member.second));
         }
         return result;
     }
@@ -1125,7 +704,7 @@ public:
         if (int(members.size()) != count)
             return false;
 
-        const auto manifest = SessionManifestCodec::appendSessionMetadata(
+        const auto manifest = SessionDetail::SessionManifestCodec::appendSessionMetadata(
             buildManifest(members), metadata ? *metadata : getSession().getMetadata());
         if (manifest.size() + std::to_string(sessionController_.agreement().revision() + 1).size() + 1 > 4096)
         {
@@ -1194,13 +773,13 @@ public:
             return;
 
         MultiplayerSessionMetadata receivedMetadata;
-        if (!SessionManifestCodec::decodeSessionMetadata(receivedManifest.substr(marker + 4), receivedMetadata))
+        if (!SessionDetail::SessionManifestCodec::decodeSessionMetadata(receivedManifest.substr(marker + 4), receivedMetadata))
         {
             LOG_WARNING_WITHOUT_CALLER << "Steam multiplayer: invalid session metadata for manifest revision " << revision;
             return;
         }
 
-        const auto localManifest = SessionManifestCodec::appendSessionMetadata(buildManifest(members), receivedMetadata);
+        const auto localManifest = SessionDetail::SessionManifestCodec::appendSessionMetadata(buildManifest(members), receivedMetadata);
         if (localManifest != receivedManifest)
         {
             LOG_WARNING_WITHOUT_CALLER << "Steam multiplayer: locally reconstructed manifest differs from host revision " << revision;
@@ -1468,7 +1047,7 @@ public:
         // Lock only the exact current published snapshot; failed metadata publication cannot start a game.
         publishManifest();
         if (!sessionController_.agreement().revision() || sessionController_.agreement().manifest() !=
-            SessionManifestCodec::appendSessionMetadata(buildManifest(ordered), getSession().getMetadata()))
+            SessionDetail::SessionManifestCodec::appendSessionMetadata(buildManifest(ordered), getSession().getMetadata()))
             return false;
 
         // The frozen roster, phase and manifest revision form one lobby-data
@@ -2083,13 +1662,13 @@ public:
 
     bool setSessionMetadata(const String& key, const String& value) override
     {
-        if (!canEditSessionMetadata() || !SessionManifestCodec::validMetadataKey(key) || value.length() > 256)
+        if (!canEditSessionMetadata() || !SessionDetail::SessionManifestCodec::validMetadataKey(key) || value.length() > 256)
             return false;
 
         // Start editing from the last published snapshot; never expose staged values through getSession().
         auto candidate = sessionController_.metadataDirty() ? sessionController_.stagedMetadata() : getSession().getMetadata();
         candidate[key] = value;
-        if (!SessionManifestCodec::validMetadata(candidate))
+        if (!SessionDetail::SessionManifestCodec::validMetadata(candidate))
             return false;
 
         sessionController_.stageMetadata(candidate);
@@ -2098,7 +1677,7 @@ public:
 
     bool removeSessionMetadata(const String& key) override
     {
-        if (!canEditSessionMetadata() || !SessionManifestCodec::validMetadataKey(key))
+        if (!canEditSessionMetadata() || !SessionDetail::SessionManifestCodec::validMetadataKey(key))
             return false;
 
         auto candidate = sessionController_.metadataDirty() ? sessionController_.stagedMetadata() : getSession().getMetadata();
@@ -2119,7 +1698,7 @@ public:
             return true;
 
         // Publish the complete manifest before changing the host's public session snapshot.
-        if (!SessionManifestCodec::validMetadata(sessionController_.stagedMetadata()) ||
+        if (!SessionDetail::SessionManifestCodec::validMetadata(sessionController_.stagedMetadata()) ||
             !publishManifest(&sessionController_.stagedMetadata()))
             return false;
 
@@ -2534,7 +2113,7 @@ private:
     GetFriendPersonaNameFunction getFriendPersonaName_ = nullptr;
     SetRichPresenceFunction setRichPresence_ = nullptr;
     std::set<std::string> platformValueKeys_;
-    SessionController<uint64_t> sessionController_;
+    SessionDetail::SessionController<uint64_t> sessionController_;
 };
 
 /** Steam lifecycle with manual dispatch so callbacks reach Carbon without Steam SDK linkage. */
