@@ -393,6 +393,47 @@ private:
     int localReadySentValue_ = -1;
     MultiplayerSessionState confirmedPhase_ = MultiplayerSessionState::None;
 };
+// Keep host assignments separate from the currently published routing table.
+// A member can leave the roster without losing its original host-assigned ID.
+template <typename MemberID>
+class SessionPlayerRegistry
+{
+public:
+    typedef std::map<MemberID, uint32_t> AssignmentMap;
+    typedef std::map<uint32_t, MemberID> DestinationMap;
+
+    const AssignmentMap& assignments() const { return assignments_; }
+    const DestinationMap& destinations() const { return destinations_; }
+
+    uint32_t assign(const MemberID& member)
+    {
+        // Reuse existing IDs; new IDs are allocated in host-observed join order.
+        const auto found = assignments_.find(member);
+        if (found != assignments_.end())
+            return found->second;
+
+        const auto id = nextPlayerID_++;
+        assignments_.insert({member, id});
+        return id;
+    }
+
+    void setDestinations(const DestinationMap& destinations)
+    {
+        destinations_ = destinations;
+    }
+
+    void clear()
+    {
+        assignments_.clear();
+        destinations_.clear();
+        nextPlayerID_ = 1;
+    }
+
+private:
+    AssignmentMap assignments_;
+    DestinationMap destinations_;
+    uint32_t nextPlayerID_ = 1;
+};
 }
 
 #if defined(WINDOWS) || defined(MACOS)
@@ -967,8 +1008,8 @@ public:
         for (int index = 0; index < count; ++index)
         {
             const auto steamID = getLobbyMember_(matchmaking_, lobbyID_, index);
-            const auto found = localPlayerIDs_.find(steamID);
-            if (found == localPlayerIDs_.end())
+            const auto found = playerRegistry_.assignments().find(steamID);
+            if (found == playerRegistry_.assignments().end())
                 return false;
             members[found->second] = steamID;
         }
@@ -1025,7 +1066,7 @@ public:
             return;
 
         std::map<uint32_t, uint64_t> members;
-        for (const auto& entry : steamByPlayerID_)
+        for (const auto& entry : playerRegistry_.destinations())
             members[entry.first] = entry.second;
         if (members.size() != session.getPlayerCount())
             return;
@@ -1271,7 +1312,7 @@ public:
 
         // Only members of the host's committed roster may confirm it.
         if (message.substr(separator + 1) != manifestAgreement_.manifest() ||
-            localPlayerIDs_.find(sender) == localPlayerIDs_.end() ||
+            playerRegistry_.assignments().find(sender) == playerRegistry_.assignments().end() ||
             (sessionState_ == MultiplayerSessionState::Syncing &&
              std::find(frozenSteamMembers_.begin(), frozenSteamMembers_.end(), sender) == frozenSteamMembers_.end()))
         {
@@ -1305,8 +1346,8 @@ public:
         for (int index = 0; index < count; ++index)
         {
             const auto steamID = getLobbyMember_(matchmaking_, lobbyID_, index);
-            const auto found = localPlayerIDs_.find(steamID);
-            if (found != localPlayerIDs_.end())
+            const auto found = playerRegistry_.assignments().find(steamID);
+            if (found != playerRegistry_.assignments().end())
                 ordered[found->second] = steamID;
         }
 
@@ -1349,7 +1390,7 @@ public:
     {
         // Count only authenticated remote participants in the current Carbon registry.
         unsigned int count = 0;
-        for (const auto& player : steamByPlayerID_)
+        for (const auto& player : playerRegistry_.destinations())
         {
             const auto peer = peers_.find(player.second);
             if (player.second != localSteamID_ && peer != peers_.end() && peer->second.connected &&
@@ -1362,7 +1403,7 @@ public:
     PlayerID getConnectedPlayer(unsigned int index) const override
     {
         // Return stable Carbon identities, in PlayerID order.
-        for (const auto& player : steamByPlayerID_)
+        for (const auto& player : playerRegistry_.destinations())
         {
             const auto peer = peers_.find(player.second);
             if (player.second != localSteamID_ && peer != peers_.end() && peer->second.connected &&
@@ -1378,8 +1419,8 @@ public:
         if (!recipient.isValid())
             return false;
 
-        const auto destination = steamByPlayerID_.find(recipient.getValue());
-        if (destination == steamByPlayerID_.end() || destination->second == localSteamID_)
+        const auto destination = playerRegistry_.destinations().find(recipient.getValue());
+        if (destination == playerRegistry_.destinations().end() || destination->second == localSteamID_)
             return false;
 
         const auto peer = peers_.find(destination->second);
@@ -1409,7 +1450,7 @@ public:
             return false;
 
         std::vector<uint32_t> recipients;
-        for (const auto& player : steamByPlayerID_)
+        for (const auto& player : playerRegistry_.destinations())
         {
             const auto peer = peers_.find(player.second);
             if (player.second != localSteamID_ && peer != peers_.end() && peer->second.connected &&
@@ -1428,8 +1469,8 @@ public:
         bool allSubmitted = true;
         for (const auto playerID : recipients)
         {
-            const auto destination = steamByPlayerID_.find(playerID);
-            if (destination == steamByPlayerID_.end())
+            const auto destination = playerRegistry_.destinations().find(playerID);
+            if (destination == playerRegistry_.destinations().end())
             {
                 allSubmitted = false;
                 continue;
@@ -1556,9 +1597,9 @@ public:
         }
 
         // Assign IDs only on the host, in join order. PlayerID 1 always belongs to the host.
-        if (isHost && localPlayerIDs_.empty() && sessionState_ == MultiplayerSessionState::Lobby)
+        if (isHost && playerRegistry_.assignments().empty() && sessionState_ == MultiplayerSessionState::Lobby)
         {
-            localPlayerIDs_[hostSteamID] = nextPlayerID_++;
+            playerRegistry_.assign(hostSteamID);
         }
 
         std::map<uint32_t, MultiplayerPlayer> orderedRoster;
@@ -1583,16 +1624,15 @@ public:
 
             if (isHost && sessionState_ == MultiplayerSessionState::Lobby)
             {
-                auto found = localPlayerIDs_.find(steamID);
-                if (found == localPlayerIDs_.end())
+                const auto isNewMember = playerRegistry_.assignments().count(steamID) == 0;
+                const auto assignedID = playerRegistry_.assign(steamID);
+                if (isNewMember)
                 {
-                    const auto newID = nextPlayerID_++;
-                    found = localPlayerIDs_.insert({steamID, newID}).first;
-                    LOG_INFO << "Steam multiplayer: assigned Carbon PlayerID " << newID << " to Steam member " << steamID;
+                    LOG_INFO << "Steam multiplayer: assigned Carbon PlayerID " << assignedID << " to Steam member " << steamID;
                 }
 
                 // Publish the shared ID and display name through the owner-managed lobby data.
-                const auto published = std::to_string(found->second);
+                const auto published = std::to_string(assignedID);
                 const auto previousID = getLobbyData_(matchmaking_, lobbyID_, idKey.c_str());
                 if (!previousID || published != previousID)
                     setLobbyData_(matchmaking_, lobbyID_, idKey.c_str(), published.c_str());
@@ -1643,7 +1683,7 @@ public:
         Vector<MultiplayerPlayer> roster;
         for (const auto& entry : orderedRoster)
             roster.append(entry.second);
-        steamByPlayerID_ = destinations;
+        playerRegistry_.setDestinations(destinations);
 
         auto& session = mutableSession();
 
@@ -1892,7 +1932,7 @@ public:
                     NetFrame frame;
                     // Only deliver frames from authenticated peers with a published Carbon PlayerID.
                     PlayerID sender;
-                    for (const auto& player : steamByPlayerID_)
+                    for (const auto& player : playerRegistry_.destinations())
                     {
                         if (player.second == peer.first)
                         {
@@ -2087,11 +2127,9 @@ public:
         lobbyID_ = 0;
         sessionHostSteamID_ = 0;
         networkVersion_ = String();
-        localPlayerIDs_.clear();
-        steamByPlayerID_.clear();
+        playerRegistry_.clear();
         frozenSteamMembers_.clear();
         manifestAgreement_.clear();
-        nextPlayerID_ = 1;
         localSteamID_ = steamUser_ && getSteamID_ ? getSteamID_(steamUser_) : 0;
         // Preserve the completed session's identity and outcome for the application.
         const auto previousState = mutableSession().getState();
@@ -2415,10 +2453,8 @@ private:
     GetFriendPersonaNameFunction getFriendPersonaName_ = nullptr;
     SetRichPresenceFunction setRichPresence_ = nullptr;
     std::set<std::string> platformValueKeys_;
-    std::map<uint64_t, uint32_t> localPlayerIDs_;
-    std::map<uint32_t, uint64_t> steamByPlayerID_;
+    SessionPlayerRegistry<uint64_t> playerRegistry_;
     std::vector<uint64_t> frozenSteamMembers_;
-    uint32_t nextPlayerID_ = 1;
     MultiplayerSessionMetadata stagedMetadata_;
     bool metadataDirty_ = false;
     SessionManifestAgreement<uint64_t> manifestAgreement_;
