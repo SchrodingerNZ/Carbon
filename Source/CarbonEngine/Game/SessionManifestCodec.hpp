@@ -7,6 +7,8 @@
 #include "CarbonEngine/Common.h"
 #include "CarbonEngine/Game/MultiplayerSession.h"
 #include <cstddef>
+#include <cstdlib>
+#include <map>
 #include <string>
 
 // Internal implementation shared by the native connection providers.
@@ -116,6 +118,45 @@ public:
             return false;
 
         result = parsed;
+        return true;
+    }
+
+    // Serialize entries in Carbon PlayerID order. Providers supply a canonical,
+    // delimiter-safe identity representation and the current published name.
+    template <typename MemberID, typename EncodeIdentity, typename GetName>
+    static std::string buildRoster(const std::map<uint32_t, MemberID>& members,
+                                   EncodeIdentity encodeIdentity, GetName getName)
+    {
+        std::string result;
+        for (const auto& member : members)
+        {
+            if (!result.empty())
+                result += ";";
+
+            result += std::to_string(member.first) + ":" + encodeIdentity(member.second) + ":" +
+                      encodeManifestName(getName(member.second));
+        }
+        return result;
+    }
+
+    // Parse the revision and manifest together, rejecting noncanonical revisions.
+    static bool decodeSnapshot(const std::string& snapshot, uint64_t& revision, std::string& manifest)
+    {
+        revision = 0;
+        manifest.clear();
+
+        const auto separator = snapshot.find('|');
+        if (separator == std::string::npos || separator == 0 || separator + 1 == snapshot.size())
+            return false;
+
+        const auto number = snapshot.substr(0, separator);
+        char* end = nullptr;
+        const auto parsed = std::strtoull(number.c_str(), &end, 10);
+        if (!parsed || !end || *end || std::to_string(parsed) != number)
+            return false;
+
+        revision = parsed;
+        manifest = snapshot.substr(separator + 1);
         return true;
     }
 

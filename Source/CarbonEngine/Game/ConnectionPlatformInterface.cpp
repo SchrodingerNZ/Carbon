@@ -634,16 +634,9 @@ public:
     // Each entry records the Carbon ID, the provider identity and the display name.
     std::string buildManifest(const std::map<uint32_t, uint64_t>& members) const
     {
-        std::string result;
-        for (const auto& member : members)
-        {
-            if (!result.empty())
-                result += ";";
-
-            result += std::to_string(member.first) + ":" + std::to_string(member.second) + ":" +
-                      SessionDetail::SessionManifestCodec::encodeManifestName(getManifestPlayerName(member.second));
-        }
-        return result;
+        return SessionDetail::SessionManifestCodec::buildRoster(
+            members, [](uint64_t member) { return std::to_string(member); },
+            [this](uint64_t member) { return getManifestPlayerName(member); });
     }
 
     // Read the manifest and revision as one authoritative Steam lobby-data value.
@@ -660,20 +653,7 @@ public:
         if (!rawSnapshot)
             return false;
 
-        const std::string snapshot(rawSnapshot);
-        const auto separator = snapshot.find('|');
-        if (separator == std::string::npos || separator == 0 || separator + 1 == snapshot.size())
-            return false;
-
-        const auto number = snapshot.substr(0, separator);
-        char* end = nullptr;
-        const auto parsed = std::strtoull(number.c_str(), &end, 10);
-        if (!parsed || !end || *end || std::to_string(parsed) != number)
-            return false;
-
-        revision = parsed;
-        manifest = snapshot.substr(separator + 1);
-        return true;
+        return SessionDetail::SessionManifestCodec::decodeSnapshot(rawSnapshot, revision, manifest);
     }
 
     // Announcements are advisory; lobby metadata is always the authoritative source.
@@ -747,42 +727,19 @@ public:
         if (!readManifestSnapshot(revision, receivedManifest))
             return;
 
-        // Match the metadata against our locally built Carbon registry.
-        const auto& session = getSession();
-        if (!session.getLocalPlayerID().isValid() || !session.getHostPlayerID().isValid() ||
-            session.getPlayerCount() == 0)
-            return;
-
-        std::map<uint32_t, uint64_t> members;
-        for (const auto& entry : sessionController_.registry().destinations())
-            members[entry.first] = entry.second;
-        if (members.size() != session.getPlayerCount())
-            return;
-
-        for (const auto& member : members)
-        {
-            const auto player = session.getPlayer(PlayerID(member.first));
-            if (!player || player->getName() != String(getManifestPlayerName(member.second).c_str()))
-                return;
-        }
-
-        // Metadata is host-authored; validate its encoding independently before accepting it.
-        // Roster identities and names are still reconstructed from local Carbon state.
-        const auto marker = receivedManifest.find("|M1|");
-        if (marker == std::string::npos || receivedManifest.find("|M1|", marker + 4) != std::string::npos)
-            return;
-
+        // Validate the host snapshot against the local Carbon roster and metadata codec.
         MultiplayerSessionMetadata receivedMetadata;
-        if (!SessionDetail::SessionManifestCodec::decodeSessionMetadata(receivedManifest.substr(marker + 4), receivedMetadata))
+        std::string localManifest;
+        using Validation = SessionDetail::SessionController<uint64_t>::ManifestValidation;
+        const auto validation = sessionController_.validateManifest(
+            getSession(), receivedManifest, [](uint64_t member) { return std::to_string(member); },
+            [this](uint64_t member) { return getManifestPlayerName(member); }, receivedMetadata, localManifest);
+        if (validation != Validation::Valid)
         {
-            LOG_WARNING_WITHOUT_CALLER << "Steam multiplayer: invalid session metadata for manifest revision " << revision;
-            return;
-        }
-
-        const auto localManifest = SessionDetail::SessionManifestCodec::appendSessionMetadata(buildManifest(members), receivedMetadata);
-        if (localManifest != receivedManifest)
-        {
-            LOG_WARNING_WITHOUT_CALLER << "Steam multiplayer: locally reconstructed manifest differs from host revision " << revision;
+            if (validation == Validation::InvalidMetadata)
+                LOG_WARNING_WITHOUT_CALLER << "Steam multiplayer: invalid session metadata for manifest revision " << revision;
+            else if (validation == Validation::DifferentManifest)
+                LOG_WARNING_WITHOUT_CALLER << "Steam multiplayer: locally reconstructed manifest differs from host revision " << revision;
             return;
         }
 

@@ -6,6 +6,7 @@
 
 #include "CarbonEngine/Common.h"
 #include "CarbonEngine/Game/MultiplayerSession.h"
+#include "CarbonEngine/Game/SessionManifestCodec.hpp"
 #include <cstddef>
 #include <cstdint>
 #include <map>
@@ -203,6 +204,48 @@ public:
     const SessionManifestAgreement<MemberID>& agreement() const { return agreement_; }
     std::vector<MemberID>& frozenMembers() { return frozenMembers_; }
     const std::vector<MemberID>& frozenMembers() const { return frozenMembers_; }
+
+    enum class ManifestValidation
+    {
+        Valid, IncompleteRoster, InvalidFormat, InvalidMetadata, DifferentManifest
+    };
+
+    // Reconstruct the guest's local roster before accepting host-authored metadata.
+    // The caller must still verify the snapshot has not been superseded and dispatch events.
+    template <typename EncodeIdentity, typename GetName>
+    ManifestValidation validateManifest(const MultiplayerSession& session, const std::string& receivedManifest,
+                                        EncodeIdentity encodeIdentity, GetName getName,
+                                        MultiplayerSessionMetadata& receivedMetadata, std::string& localManifest) const
+    {
+        if (!session.getLocalPlayerID().isValid() || !session.getHostPlayerID().isValid() ||
+            session.getPlayerCount() == 0)
+            return ManifestValidation::IncompleteRoster;
+
+        const auto& members = registry_.destinations();
+        if (members.size() != session.getPlayerCount())
+            return ManifestValidation::IncompleteRoster;
+
+        for (const auto& member : members)
+        {
+            const auto player = session.getPlayer(PlayerID(member.first));
+            if (!player || player->getName() != String(getName(member.second).c_str()))
+                return ManifestValidation::IncompleteRoster;
+        }
+
+        const auto marker = receivedManifest.find("|M1|");
+        if (marker == std::string::npos || receivedManifest.find("|M1|", marker + 4) != std::string::npos)
+            return ManifestValidation::InvalidFormat;
+
+        if (!SessionManifestCodec::decodeSessionMetadata(receivedManifest.substr(marker + 4), receivedMetadata))
+            return ManifestValidation::InvalidMetadata;
+
+        localManifest = SessionManifestCodec::appendSessionMetadata(
+            SessionManifestCodec::buildRoster(members, encodeIdentity, getName), receivedMetadata);
+        if (localManifest != receivedManifest)
+            return ManifestValidation::DifferentManifest;
+
+        return ManifestValidation::Valid;
+    }
 
     bool metadataDirty() const { return metadataDirty_; }
     const MultiplayerSessionMetadata& stagedMetadata() const { return stagedMetadata_; }
