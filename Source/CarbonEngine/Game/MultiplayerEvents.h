@@ -79,7 +79,7 @@ private:
 /** Which asynchronous lobby operation has completed. */
 enum class MultiplayerOperation
 {
-    FindLobbies,
+    FindLobby,
     CreateLobby,
     JoinLobby
 };

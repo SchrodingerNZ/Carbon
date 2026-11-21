@@ -27,22 +27,17 @@ public:
     /** Local platform display name; available independently of lobby/session membership. */
     virtual String getLocalPlayerName() const { return "Player"; }
 
-    /** Start an asynchronous lobby search. False means the request was not submitted; no completion event follows. */
-    virtual bool findLobbies(const String& networkVersion) { return false; }
+    /** Find and join a compatible lobby asynchronously. False means the request was not submitted. */
+    virtual bool findLobby(const String& networkVersion) { return false; }
 
-    /** True while the most recently requested search is in flight. */
+    /** True while automatic discovery or its subsequent join is in flight. */
     virtual bool isSearching() const { return false; }
-
-    /** Most recent search completed successfully. False also applies before the first search. */
-    virtual bool hasSearchResults() const { return false; }
-
-    virtual unsigned int getLobbyCount() const { return 0; }
 
     /** Create a public lobby. Successful submission is followed by an operation-completion event. */
     virtual bool createLobby(const String& networkVersion, unsigned int maxMembers) { return false; }
 
-    /** Join a discovered lobby. False means no asynchronous operation was started. */
-    virtual bool joinLobby(unsigned int index, const String& networkVersion) { return false; }
+    /** Join a platform-identified lobby. False means no asynchronous operation was started. */
+    virtual bool joinLobby(uint64_t lobbyID, const String& networkVersion) { return false; }
 
     /** Leave the current lobby and invalidate outstanding lobby operations. */
     virtual void leaveLobby() {}

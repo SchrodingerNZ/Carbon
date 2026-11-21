@@ -613,11 +613,12 @@ public:
         platformValueKeys_.clear();
     }
 
-    bool isSearching() const override { return searching_; }
-    bool hasSearchResults() const override { return completed_; }
-    unsigned int getLobbyCount() const override { return lobbyCount_; }
+    bool isSearching() const override
+    {
+        return searching_ || (pendingRole_ == Role::Guest && pendingGuestOperation_ == MultiplayerOperation::FindLobby);
+    }
     bool isInLobby() const override { return lobbyID_ != 0; }
-    bool isLobbyPending() const override { return pendingLobbyCall_ != 0 || pendingRole_ != Role::None; }
+    bool isLobbyPending() const override { return searching_ || pendingLobbyCall_ != 0 || pendingRole_ != Role::None; }
     uint64_t getLobbyID() const override { return lobbyID_; }
 
     // Convert arbitrary player-name bytes to a delimiter-safe, canonical form.
@@ -1766,7 +1767,7 @@ public:
         }
     }
 
-    bool findLobbies(const String& networkVersion) override
+    bool findLobby(const String& networkVersion) override
     {
         if (!available_ || searching_ || isLobbyPending() || isInLobby())
             return false;
@@ -1781,8 +1782,7 @@ public:
         }
 
         searching_ = true;
-        completed_ = false;
-        lobbyCount_ = 0;
+        networkVersion_ = networkVersion;
         LOG_INFO << "Steam multiplayer: requested compatible lobbies, network version " << networkVersion;
         return true;
     }
@@ -1898,11 +1898,6 @@ public:
         if (!available_ || isInLobby() || isLobbyPending() || !maxMembers || maxMembers > 250)
             return false;
 
-        // An outstanding search may complete later; it must not affect this new session.
-        searching_ = false;
-        completed_ = false;
-        pendingSearchCall_ = 0;
-        lobbyCount_ = 0;
         networkVersion_ = networkVersion;
 
         // k_ELobbyTypePublic = 2. This creates only the lobby, not a peer socket.
@@ -1918,23 +1913,18 @@ public:
         return true;
     }
 
-    bool joinLobby(unsigned int index, const String& networkVersion) override
+    bool joinLobby(uint64_t lobbyID, const String& networkVersion) override
     {
-        if (!available_ || searching_ || !completed_ || index >= lobbyCount_ || isInLobby() || isLobbyPending())
+        return beginLobbyJoin(lobbyID, networkVersion, MultiplayerOperation::JoinLobby);
+    }
+
+    bool beginLobbyJoin(uint64_t candidate, const String& networkVersion, MultiplayerOperation operation)
+    {
+        if (!available_ || !candidate || isInLobby() || isLobbyPending())
             return false;
 
-        const auto candidate = getLobbyByIndex_(matchmaking_, int(index));
-        if (!candidate)
-            return false;
-
-        // Do not trust discovery alone; invites and stale lists can bypass the filter.
-        const auto publishedVersion = getLobbyData_(matchmaking_, candidate, "network_version");
-        if (!publishedVersion || networkVersion != String(publishedVersion))
-        {
-            LOG_WARNING_WITHOUT_CALLER << "Steam multiplayer: refusing lobby with incompatible network version";
-            return false;
-        }
-
+        // Direct invitations may not have cached lobby metadata. Validate the
+        // network version on entry, before exposing a session to the game.
         networkVersion_ = networkVersion;
         pendingLobbyCall_ = joinLobby_(matchmaking_, candidate);
         if (!pendingLobbyCall_)
@@ -1943,9 +1933,11 @@ public:
             return false;
         }
 
+        // Keep the original operation identity through asynchronous lobby entry.
         pendingRole_ = Role::Guest;
+        pendingGuestOperation_ = operation;
         requestedLobbyID_ = candidate;
-        LOG_INFO << "Steam multiplayer: joining discovered lobby " << candidate;
+        LOG_INFO << "Steam multiplayer: joining lobby " << candidate;
         return true;
     }
 
@@ -1976,8 +1968,6 @@ public:
         pendingLobbyCall_ = 0;
         searching_ = false;
         pendingSearchCall_ = 0;
-        completed_ = false;
-        lobbyCount_ = 0;
         requestedLobbyID_ = 0;
 
         if (lobbyID_ && leaveLobby_)
@@ -2068,7 +2058,7 @@ public:
             LOG_WARNING_WITHOUT_CALLER << "Steam multiplayer: lobby entry failed, response " << response;
             pendingLobbyCall_ = 0;
             const auto operation = pendingRole_ == Role::Host ? MultiplayerOperation::CreateLobby
-                                                              : MultiplayerOperation::JoinLobby;
+                                                              : pendingGuestOperation_;
             pendingRole_ = Role::None;
             requestedLobbyID_ = 0;
             dispatchOperationCompleted(operation, false);
@@ -2097,14 +2087,14 @@ public:
                 pendingLobbyCall_ = 0;
                 pendingRole_ = Role::None;
                 requestedLobbyID_ = 0;
-                dispatchOperationCompleted(MultiplayerOperation::JoinLobby, false);
+                dispatchOperationCompleted(pendingGuestOperation_, false);
                 return;
             }
         }
 
         pendingEntryWasHost_ = pendingRole_ == Role::Host;
         const auto completedOperation = pendingEntryWasHost_ ? MultiplayerOperation::CreateLobby
-                                                            : MultiplayerOperation::JoinLobby;
+                                                            : pendingGuestOperation_;
         lobbyID_ = enteredID;
         ++sessionGeneration_;
         sessionHostSteamID_ = getLobbyOwner_(matchmaking_, enteredID);
@@ -2169,17 +2159,25 @@ public:
             const auto success = getCallResult_(pipe, call, &count, sizeof(count), 510, &ioFailed);
             pendingSearchCall_ = 0;
             searching_ = false;
-            completed_ = success && !ioFailed;
-
-            if (!completed_)
-                LOG_WARNING_WITHOUT_CALLER << "Steam multiplayer: lobby discovery call failed";
-            else
+            if (!success || ioFailed)
             {
-                lobbyCount_ = count;
-                LOG_INFO << "Steam multiplayer: found " << lobbyCount_ << " compatible lobbies";
+                LOG_WARNING_WITHOUT_CALLER << "Steam multiplayer: lobby discovery call failed";
+                dispatchOperationCompleted(MultiplayerOperation::FindLobby, false);
+                return;
             }
 
-            dispatchOperationCompleted(MultiplayerOperation::FindLobbies, completed_);
+            // Steam returns its preferred candidates first. Try each in order
+            // until a join request is accepted; entry reports the final outcome.
+            LOG_INFO << "Steam multiplayer: found " << count << " compatible lobbies";
+            for (uint32_t index = 0; index < count; ++index)
+            {
+                const auto candidate = getLobbyByIndex_(matchmaking_, int(index));
+                if (beginLobbyJoin(candidate, networkVersion_, MultiplayerOperation::FindLobby))
+                    return;
+            }
+
+            // No candidate could be joined. The game decides whether to retry.
+            dispatchOperationCompleted(MultiplayerOperation::FindLobby, false);
             return;
         }
 
@@ -2219,7 +2217,7 @@ public:
                 LOG_WARNING_WITHOUT_CALLER << "Steam multiplayer: JoinLobby callback failed";
                 pendingRole_ = Role::None;
                 requestedLobbyID_ = 0;
-                dispatchOperationCompleted(MultiplayerOperation::JoinLobby, false);
+                dispatchOperationCompleted(pendingGuestOperation_, false);
             }
         }
     }
@@ -2285,11 +2283,10 @@ private:
     uint64_t requestedLobbyID_ = 0;
     uint64_t pendingSearchCall_ = 0;
     uint64_t pendingLobbyCall_ = 0;
-    unsigned int lobbyCount_ = 0;
     Role pendingRole_ = Role::None;
+    MultiplayerOperation pendingGuestOperation_ = MultiplayerOperation::JoinLobby;
     bool available_ = false;
     bool searching_ = false;
-    bool completed_ = false;
     bool socketsAvailable_ = false;
     bool pendingEntryWasHost_ = false;
     void* sockets_ = nullptr;
