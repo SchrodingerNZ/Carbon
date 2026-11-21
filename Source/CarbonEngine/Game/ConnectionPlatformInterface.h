@@ -42,8 +42,11 @@ public:
     /** Leave the current lobby and invalidate outstanding lobby operations. */
     virtual void leaveLobby() {}
 
+    /** Returns whether a platform lobby is currently joined. */
     virtual bool isInLobby() const { return false; }
+    /** Returns whether a lobby search, creation or join operation is pending. */
     virtual bool isLobbyPending() const { return false; }
+    /** Returns the current platform lobby identifier, or zero if unavailable. */
     virtual uint64_t getLobbyID() const { return 0; }
 
     /** Current local session snapshot. Registry and metadata updates are reconciled across participants. */
@@ -80,9 +83,11 @@ public:
 
     /** Connected, authenticated remote session participants (excluding the local instance). */
     virtual unsigned int getConnectedPlayerCount() const { return 0; }
+    /** Returns the remote connected player at the given index, or an invalid ID if out of range. */
     virtual PlayerID getConnectedPlayer(unsigned int index) const { return PlayerID(); }
 
 protected:
+    /** Provides the backend with mutable access to its public session snapshot. */
     MultiplayerSession& mutableSession() { return session_; }
 
     /** Notify applications after the public session state has been updated. */

@@ -17,10 +17,13 @@ namespace Carbon
 class CARBON_API MultiplayerSessionStateChangedEvent : public Event
 {
 public:
+    /** Constructs an event describing a session lifecycle transition. */
     MultiplayerSessionStateChangedEvent(MultiplayerSessionState previous, MultiplayerSessionState current)
         : previous_(previous), current_(current) {}
 
+    /** Returns the state before the transition. */
     MultiplayerSessionState getPreviousState() const { return previous_; }
+    /** Returns the state after the transition. */
     MultiplayerSessionState getCurrentState() const { return current_; }
 
 private:
@@ -40,12 +43,16 @@ public:
 class CARBON_API MultiplayerPlayerConnectionStateChangedEvent : public Event
 {
 public:
+    /** Constructs an event describing a player connectivity transition. */
     MultiplayerPlayerConnectionStateChangedEvent(PlayerID playerID, MultiplayerConnectionState previous,
                                                  MultiplayerConnectionState current)
         : playerID_(playerID), previous_(previous), current_(current) {}
 
+    /** Returns the identifier of the player whose connectivity changed. */
     PlayerID getPlayerID() const { return playerID_; }
+    /** Returns the state before the transition. */
     MultiplayerConnectionState getPreviousState() const { return previous_; }
+    /** Returns the state after the transition. */
     MultiplayerConnectionState getCurrentState() const { return current_; }
 
 private:
@@ -65,10 +72,13 @@ enum class MultiplayerSessionEndReason
 class CARBON_API MultiplayerSessionEndedEvent : public Event
 {
 public:
+    /** Constructs an event identifying the ended session and its termination reason. */
     MultiplayerSessionEndedEvent(uint64_t sessionID, MultiplayerSessionEndReason reason)
         : sessionID_(sessionID), reason_(reason) {}
 
+    /** Returns the identifier of the session that ended. */
     uint64_t getSessionID() const { return sessionID_; }
+    /** Returns the reason the session ended. */
     MultiplayerSessionEndReason getReason() const { return reason_; }
 
 private:
@@ -89,10 +99,13 @@ enum class MultiplayerOperation
 class CARBON_API MultiplayerOperationCompletedEvent : public Event
 {
 public:
+    /** Constructs an event containing the result of an asynchronous lobby operation. */
     MultiplayerOperationCompletedEvent(MultiplayerOperation operation, bool succeeded)
         : operation_(operation), succeeded_(succeeded) {}
 
+    /** Returns the asynchronous lobby operation that completed. */
     MultiplayerOperation getOperation() const { return operation_; }
+    /** Returns whether the operation completed successfully. */
     bool succeeded() const { return succeeded_; }
 
 private:
@@ -105,9 +118,12 @@ private:
 class CARBON_API NetFrameReceivedEvent : public Event
 {
 public:
+    /** Constructs an event containing the authenticated sender and received frame. */
     NetFrameReceivedEvent(PlayerID sender, const NetFrame& frame) : sender_(sender), frame_(frame) {}
 
+    /** Returns the authenticated sender's session-scoped Carbon ID. */
     PlayerID getSender() const { return sender_; }
+    /** Returns the received application frame. */
     const NetFrame& getFrame() const { return frame_; }
 
 private:

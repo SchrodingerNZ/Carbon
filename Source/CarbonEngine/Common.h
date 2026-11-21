@@ -759,15 +759,15 @@ extern CARBON_API MaterialManager& materials();
  */
 extern CARBON_API MeshManager& meshes();
 
-/**
- * Returns the global PhysicsInterface instance, this is shorthand for Globals::physics().
- */
 /** Returns the global achievement manager. */
 extern CARBON_API AchievementManager& achievements();
 
 /** Returns the active connection platform's multiplayer capability. */
 extern CARBON_API MultiplayerInterface& multiplayer();
 
+/**
+ * Returns the global PhysicsInterface instance, this is shorthand for Globals::physics().
+ */
 extern CARBON_API PhysicsInterface& physics();
 
 /**

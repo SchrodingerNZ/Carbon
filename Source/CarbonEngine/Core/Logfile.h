@@ -8,6 +8,18 @@
 namespace Carbon
 {
 
+/** Selects a named visual style for a single logfile entry. Place this immediately after a LOG_* macro. */
+class CARBON_API LogStyle
+{
+public:
+    /** Constructs a selector for the supplied logfile style name. */
+    explicit LogStyle(String name) : name_(std::move(name)) {}
+    /** Returns the selected style name. */
+    const String& getName() const { return name_; }
+private:
+    String name_;
+};
+
 /**
  * Manages the HTML logfile which is how information, warnings and errors are recorded by the engine and application.
  * The location of the application's logfile depends on the platform:
@@ -28,16 +40,6 @@ namespace Carbon
  *
  * Output written to the logfile can be sent through arbitrary output sinks using Logfile::addOutputSink().
  */
-/** Selects a named visual style for a single logfile entry. Place this immediately after a LOG_* macro. */
-class CARBON_API LogStyle
-{
-public:
-    explicit LogStyle(String name) : name_(std::move(name)) {}
-    const String& getName() const { return name_; }
-private:
-    String name_;
-};
-
 class CARBON_API Logfile : private Noncopyable
 {
 public:

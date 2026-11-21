@@ -169,7 +169,7 @@ public:
     static void recreateGraphicsInterface();
 
     /**
-     * Returns the global Console instance.
+     * Returns the global achievement manager.
      */
     static AchievementManager& achievements()
     {
@@ -177,6 +177,9 @@ public:
         return *achievementManager_;
     }
 
+    /**
+     * Returns the global Console instance.
+     */
     static Console& console()
     {
         assert(console_);

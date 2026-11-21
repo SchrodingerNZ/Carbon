@@ -19,6 +19,7 @@ public:
 
     /** Absolute, monotonically increasing progress. The manager validates and clamps input. */
     virtual bool setProgress(const String& id, unsigned int progress, unsigned int maxProgress) = 0;
+    /** Returns absolute progress for the given identifier; maxProgress of zero denotes a boolean achievement. */
     virtual unsigned int getProgress(const String& id, unsigned int maxProgress) const = 0;
 };
 
