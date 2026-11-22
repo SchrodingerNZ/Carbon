@@ -57,7 +57,7 @@ inline bool newer(const Info& a, const Info& b)
 
 inline bool validTime(const Info& info)
 {
-    return info.seconds > 0 && info.seconds <= 253402300799ULL && info.nanos < 1000000000u;
+    return info.seconds > 0 && info.seconds <= uint64_t(253402300u) * 1000u + 799u && info.nanos < 1000000000u;
 }
 
 inline std::string lowerASCII(std::string s)

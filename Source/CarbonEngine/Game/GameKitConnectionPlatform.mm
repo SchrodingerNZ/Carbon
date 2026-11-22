@@ -31,6 +31,8 @@
 @end
 
 @implementation CarbonGameKitMatchDelegate
+@synthesize receive = _receive;
+@synthesize failure = _failure;
 - (void)match:(GKMatch*)match didReceiveData:(NSData*)data fromRemotePlayer:(GKPlayer*)player
 {
     if (self.receive)
@@ -118,7 +120,10 @@ public:
         NSString* identifier = nil;
         if (player.authenticated)
         {
+            #pragma push_macro("iOS")
+            #undef iOS
             if (@available(iOS 12.4, macOS 10.14.6, *))
+            #pragma pop_macro("iOS")
                 identifier = player.gamePlayerID;
             else
             {
@@ -540,7 +545,10 @@ private:
 // identity claimed inside a packet; GameKit supplies the authenticated sender.
 NSString* gameKitMemberIdentity(GKPlayer* player)
 {
+    #pragma push_macro("iOS")
+    #undef iOS
     if (@available(iOS 12.4, macOS 10.14.6, *))
+    #pragma pop_macro("iOS")
         return player.gamePlayerID;
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
@@ -727,13 +735,7 @@ public:
         failureReason_ = MultiplayerOperationFailureReason::None;
     }
 
-    bool isPending() const { return bool(attempt_) && !ready_; }
-    bool isReady() const { return ready_; }
-    MultiplayerOperation getOperation() const { return operation_; }
     MultiplayerOperationFailureReason getFailureReason() const { return failureReason_; }
-    NSString* getHostIdentity() const { return hostIdentity_; }
-    NSArray<NSString*>* getRoster() const { return roster_; }
-    std::shared_ptr<GameKitSessionCandidate> getCandidate() const { return ready_ ? candidate_ : nullptr; }
 
     std::shared_ptr<GameKitActiveMatch> takeReady()
     {
@@ -893,11 +895,11 @@ private:
     };
 
     static std::string key(NSString* value) { return value.UTF8String ? value.UTF8String : ""; }
-    static bool validString(id value, NSUInteger limit)
+    static bool validString(NSObject* value, NSUInteger limit)
     {
         if (![value isKindOfClass:[NSString class]])
             return false;
-        NSString* string = value;
+        auto string = static_cast<NSString*>(value);
         const auto bytes = string.UTF8String;
         const auto length = [string lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
         return bytes && length > 0 && length <= limit && strlen(bytes) == length;
@@ -980,28 +982,31 @@ private:
         // once the local native roster is complete, and compare the entire roster.
         if (![roster_ containsObject:sender])
             return false;
-        id decoded = [NSJSONSerialization JSONObjectWithData:packet.data options:0 error:nullptr];
-        if (![decoded isKindOfClass:[NSArray class]] || [(NSArray*)decoded count] != 9)
+        NSObject* decoded = [NSJSONSerialization JSONObjectWithData:packet.data options:0 error:nullptr];
+        if (![decoded isKindOfClass:[NSArray class]])
             return false;
-        NSArray* fields = decoded;
-        if (![@"CarbonGK2" isEqual:fields[0]] || !validString(fields[1], 256) ||
-            ![fields[1] isEqualToString:[NSString stringWithUTF8String:attempt_->networkVersion.cStr()]] ||
+        auto fields = static_cast<NSArray<NSObject*>*>(decoded);
+        if (fields.count != 9 || ![@"CarbonGK2" isEqual:fields[0]] || !validString(fields[1], 256) ||
             ![fields[2] isKindOfClass:[NSNumber class]] || ![fields[3] isKindOfClass:[NSNumber class]] ||
-            ![fields[4] isKindOfClass:[NSArray class]] || ![roster_ isEqualToArray:fields[4]] ||
-            ![fields[5] isKindOfClass:[NSString class]] || !validString(fields[6], 512) ||
-            !validString(fields[7], 20) || ![fields[8] isKindOfClass:[NSString class]])
+            ![fields[4] isKindOfClass:[NSArray class]] || ![fields[5] isKindOfClass:[NSString class]] ||
+            !validString(fields[6], 512) || !validString(fields[7], 20) || ![fields[8] isKindOfClass:[NSString class]])
             return false;
-        const double role = [fields[2] doubleValue];
-        const double capacity = [fields[3] doubleValue];
+        auto version = static_cast<NSString*>(fields[1]);
+        auto remoteRoster = static_cast<NSArray<NSString*>*>(fields[4]);
+        if (![version isEqualToString:[NSString stringWithUTF8String:attempt_->networkVersion.cStr()]] ||
+            ![roster_ isEqualToArray:remoteRoster])
+            return false;
+        const double role = [static_cast<NSNumber*>(fields[2]) doubleValue];
+        const double capacity = [static_cast<NSNumber*>(fields[3]) doubleValue];
         if ((role != 0 && role != 1) || (role == 0 && capacity != 0) ||
             (role == 1 && !(capacity >= 2 && capacity <= 32 && std::floor(capacity) == capacity)))
             return false;
-        const auto suppliedID = key(fields[7]);
+        const auto suppliedID = key(static_cast<NSString*>(fields[7]));
         char* end = nullptr;
         const auto sessionID = std::strtoull(suppliedID.c_str(), &end, 10);
         if (!end || *end || std::to_string(sessionID) != suppliedID || bool(sessionID) != (role == 1))
             return false;
-        const Intent intent(role == 1, static_cast<unsigned int>(capacity), key(fields[6]), sessionID);
+        const Intent intent(role == 1, static_cast<unsigned int>(capacity), key(static_cast<NSString*>(fields[6])), sessionID);
         const auto identity = key(sender);
         auto existing = intents_.find(identity);
         if (existing != intents_.end() && (existing->second.creator != intent.creator ||
@@ -1009,8 +1014,8 @@ private:
             existing->second.sessionID != intent.sessionID))
             return false;
         intents_.emplace(identity, intent);
-        NSString* host = fields[5];
-        NSString* agreement = fields[8];
+        auto host = static_cast<NSString*>(fields[5]);
+        auto agreement = static_cast<NSString*>(fields[8]);
         if (host.length)
         {
             if (![roster_ containsObject:host] || !validString(agreement, 32768))
