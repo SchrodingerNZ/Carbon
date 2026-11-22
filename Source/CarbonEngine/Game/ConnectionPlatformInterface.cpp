@@ -809,6 +809,14 @@ public:
         if (!lobbyID_ || !sessionController_.canBeginPlaying(getLobbyOwner_(matchmaking_, lobbyID_) == localSteamID_))
             return;
 
+        // Readiness records alone cannot establish current lobby membership.
+        // A frozen participant may have left after confirming and becoming ready.
+        for (const auto steamID : sessionController_.frozenMembers())
+        {
+            if (!isLobbyMember(steamID))
+                return;
+        }
+
         // Publish the phase and frozen roster together. Never expose Playing
         // without the same authoritative members and manifest revision.
         std::string roster;
