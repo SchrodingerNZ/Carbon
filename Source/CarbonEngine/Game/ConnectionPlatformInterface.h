@@ -68,6 +68,14 @@ public:
     /** Clear one previously set local platform value. False indicates unsupported or unsuccessful. */
     virtual bool clearPlatformValue(const String& key) { return false; }
 
+    /** Publish an existing local file to platform cloud storage, independently of lobby membership.
+        Local persistence remains the application's responsibility. Unsupported providers do nothing. */
+    virtual void store(const UnicodeString& filename) {}
+
+    /** Restore a missing local file or update it from a newer platform cloud copy.
+        Never discard local data on failure. Unsupported providers do nothing. */
+    virtual void update(const UnicodeString& filename) {}
+
     /** Host freezes the roster and published metadata. Gameplay begins after all participants are ready. */
     virtual bool startGame() { return false; }
 
