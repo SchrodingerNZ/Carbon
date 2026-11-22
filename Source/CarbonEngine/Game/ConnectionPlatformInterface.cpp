@@ -1017,21 +1017,36 @@ public:
     {
         // Resolve a remote Carbon participant to its authenticated Steam connection.
         if (!recipient.isValid())
+        {
+            LOG_WARNING_WITHOUT_CALLER << "Steam multiplayer: rejected NetFrame send to invalid PlayerID";
             return false;
+        }
 
         const auto destination = sessionController_.registry().destinations().find(recipient.getValue());
         if (destination == sessionController_.registry().destinations().end() || destination->second == localSteamID_)
+        {
+            LOG_WARNING_WITHOUT_CALLER << "Steam multiplayer: rejected NetFrame send to unknown or local PlayerID "
+                                       << recipient.getValue();
             return false;
+        }
 
         const auto peer = peers_.find(destination->second);
         if (!socketsAvailable_ || !lobbyID_ || !sendMessage_ || peer == peers_.end() ||
             !peer->second.connected || !isLobbyMember(destination->second))
+        {
+            LOG_WARNING_WITHOUT_CALLER << "Steam multiplayer: rejected NetFrame send to PlayerID "
+                                       << recipient.getValue() << ": transport or authenticated peer unavailable";
             return false;
+        }
 
         // Encode the game frame before submitting it to Steam's reliable transport.
         Vector<byte_t> data;
         if (!frame.encode(data) || data.empty() || data.size() > 512 * 1024)
+        {
+            LOG_WARNING_WITHOUT_CALLER << "Steam multiplayer: rejected NetFrame send: encoding failed or invalid encoded size "
+                                       << data.size();
             return false;
+        }
 
         // k_nSteamNetworkingSend_Reliable = 8; 1 means k_EResultOK.
         const auto status = sendMessage_(sockets_, peer->second.handle, data.getData(),
@@ -1047,7 +1062,10 @@ public:
     {
         // Discover authenticated remote participants from the Carbon registry.
         if (!socketsAvailable_ || !lobbyID_ || !sendMessage_)
+        {
+            LOG_WARNING_WITHOUT_CALLER << "Steam multiplayer: rejected NetFrame broadcast: transport or lobby unavailable";
             return false;
+        }
 
         std::vector<uint32_t> recipients;
         for (const auto& player : sessionController_.registry().destinations())
@@ -1059,12 +1077,19 @@ public:
         }
 
         if (recipients.empty())
+        {
+            LOG_WARNING_WITHOUT_CALLER << "Steam multiplayer: rejected NetFrame broadcast: no connected remote recipients";
             return false;
+        }
 
         // Encode once, then submit the same bytes to each connected remote recipient.
         Vector<byte_t> data;
         if (!frame.encode(data) || data.empty() || data.size() > 512 * 1024)
+        {
+            LOG_WARNING_WITHOUT_CALLER << "Steam multiplayer: rejected NetFrame broadcast: encoding failed or invalid encoded size "
+                                       << data.size();
             return false;
+        }
 
         bool allSubmitted = true;
         for (const auto playerID : recipients)
@@ -1072,6 +1097,7 @@ public:
             const auto destination = sessionController_.registry().destinations().find(playerID);
             if (destination == sessionController_.registry().destinations().end())
             {
+                LOG_WARNING_WITHOUT_CALLER << "Steam multiplayer: skipped NetFrame broadcast to missing PlayerID " << playerID;
                 allSubmitted = false;
                 continue;
             }
@@ -1079,6 +1105,8 @@ public:
             const auto peer = peers_.find(destination->second);
             if (peer == peers_.end() || !peer->second.connected || !isLobbyMember(destination->second))
             {
+                LOG_WARNING_WITHOUT_CALLER << "Steam multiplayer: skipped NetFrame broadcast to PlayerID "
+                                           << playerID << ": authenticated peer unavailable";
                 allSubmitted = false;
                 continue;
             }

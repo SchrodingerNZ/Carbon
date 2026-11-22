@@ -78,7 +78,8 @@ public:
     virtual bool send(PlayerID recipient, const NetFrame& frame) { return false; }
 
     /** Submit a reliable frame to all connected remote participants, without local echo.
-        Returns true only if at least one recipient exists and every submission succeeds. */
+        Returns true only if at least one recipient exists and every submission succeeds.
+        False may indicate partial submission; successful submission does not acknowledge remote delivery. */
     virtual bool broadcast(const NetFrame& frame) { return false; }
 
     /** Connected, authenticated remote session participants (excluding the local instance). */
