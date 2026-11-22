@@ -267,6 +267,7 @@ public:
             return;
 
         storePending_ = false;
+        storeTimeoutWarned_ = false;
 
         if (result == 1) // k_EResultOK
         {
@@ -291,24 +292,15 @@ public:
 
     void update()
     {
-        // The current-user stats cache is loaded by Steam before game launch. New Steamworks
-        // runtimes may not emit an initial UserStatsReceived_t callback at all.
-        // Probe an actual published achievement instead of waiting indefinitely or using a timer
-        // to assume readiness. A successful GetAchievement proves that reads are available.
-        if (!ready_ && std::chrono::steady_clock::now() - lastProbe_ >= std::chrono::milliseconds(500))
+        probeReadiness(false);
+
+        // StoreStats has no request handle in its completion callback. Do not overlap
+        // requests after a timeout: a late acknowledgement could acknowledge the wrong version.
+        if (storePending_ && !storeTimeoutWarned_ &&
+            std::chrono::steady_clock::now() - lastStore_ >= std::chrono::minutes(2))
         {
-            lastProbe_ = std::chrono::steady_clock::now();
-            const auto count = getNumAchievements_(userStats_);
-            if (count)
-            {
-                const auto firstID = getAchievementName_(userStats_, 0);
-                bool granted = false;
-                if (firstID && getAchievement_(userStats_, firstID, &granted))
-                {
-                    LOG_INFO << "Steam achievements: local cache available (" << count << " published achievements)";
-                    markReady();
-                }
-            }
+            storeTimeoutWarned_ = true;
+            LOG_WARNING_WITHOUT_CALLER << "Steam achievement store acknowledgement overdue; waiting for Steam";
         }
 
         if (!ready_)
@@ -323,15 +315,15 @@ public:
             flush(true);
     }
 
-    void flush(bool force)
+    void flush(bool force, bool finalAttempt = false)
     {
-        if (!ready_ || !dirty_ || storePending_ || !force)
+        if (!ready_ || !dirty_ || storePending_ || !force || (finalizing_ && !finalAttempt))
             return;
 
         const auto now = std::chrono::steady_clock::now();
         // Record attempts, not just successes, to prevent per-frame StoreStats failures.
         const auto interval = storeFailed_ ? std::chrono::seconds(60) : std::chrono::seconds(5);
-        if (now - lastStore_ < interval)
+        if (!finalAttempt && now - lastStore_ < interval)
             return;
 
         lastStore_ = now;
@@ -340,6 +332,7 @@ public:
             // Remember which changes this asynchronous request covers.
             submittedVersion_ = mutationVersion_;
             storePending_ = true;
+            storeTimeoutWarned_ = false;
             urgentStore_ = false;
         }
         else
@@ -349,7 +342,67 @@ public:
         }
     }
 
+    void beginShutdown() { finalizing_ = true; }
+
+    void prepareShutdown()
+    {
+        // Reconcile once without retry delays or intermediate stores. This is best effort;
+        // never block application shutdown waiting for Steam or the network.
+        finalizing_ = true;
+        probeReadiness(true);
+        if (ready_)
+        {
+            for (auto& item : entries_)
+            {
+                if (!item.second.requested)
+                    continue;
+                item.second.retryAfter = std::chrono::steady_clock::time_point::min();
+                reconcile(item.first, item.second);
+            }
+            flush(true, true);
+        }
+    }
+
+    void reportShutdown() const
+    {
+        for (const auto& item : entries_)
+        {
+            const auto& entry = item.second;
+            const auto target = std::max(entry.requested, entry.remote);
+            if (entry.requested && (!ready_ || !entry.loaded || entry.requested > entry.remote ||
+                (!entry.granted && target >= (entry.maxProgress ? entry.maxProgress : 1U))))
+                LOG_WARNING_WITHOUT_CALLER << "Steam achievement request unresolved at shutdown: " << item.first.c_str();
+        }
+        if (storePending_)
+            LOG_INFO << "Steam achievement store still awaiting acknowledgement at shutdown";
+        if (dirty_ && (!storePending_ || mutationVersion_ != submittedVersion_))
+            LOG_WARNING_WITHOUT_CALLER << "Steam achievement changes remain unconfirmed at shutdown; Steam may persist its local cache on exit";
+    }
+
 private:
+    void probeReadiness(bool force)
+    {
+        // The current-user stats cache is loaded by Steam before game launch. New Steamworks
+        // runtimes may not emit an initial UserStatsReceived_t callback at all.
+        // Probe an actual published achievement instead of waiting indefinitely or using a timer
+        // to assume readiness. A successful GetAchievement proves that reads are available.
+        if (!ready_ && (force || std::chrono::steady_clock::now() - lastProbe_ >= std::chrono::milliseconds(500)))
+        {
+            lastProbe_ = std::chrono::steady_clock::now();
+            const auto count = getNumAchievements_(userStats_);
+            if (count)
+            {
+                const auto firstID = getAchievementName_(userStats_, 0);
+                bool granted = false;
+                if (firstID && getAchievement_(userStats_, firstID, &granted))
+                {
+                    LOG_INFO << "Steam achievements: local cache available (" << count << " published achievements)";
+                    markReady();
+                }
+            }
+        }
+    }
+
     void markReady()
     {
         if (ready_)
@@ -357,6 +410,9 @@ private:
 
         ready_ = true;
         LOG_INFO << "Steam achievements ready";
+
+        if (finalizing_)
+            return;
 
         // Apply locally queued requests only after remote values can be read.
         for (auto& entry : entries_)
@@ -462,6 +518,8 @@ private:
     bool storePending_ = false;
     bool storeFailed_ = false;
     bool urgentStore_ = false;
+    bool finalizing_ = false;
+    bool storeTimeoutWarned_ = false;
     uint64_t mutationVersion_ = 0;
     uint64_t submittedVersion_ = 0;
     std::chrono::steady_clock::time_point lastStore_ = std::chrono::steady_clock::now() - std::chrono::minutes(1);
@@ -2465,7 +2523,10 @@ public:
         if (initialized_)
         {
             multiplayer_.shutdownSession();
-            achievements_.flush(true);
+            achievements_.beginShutdown();
+            dispatchCallbacks(true);
+            achievements_.prepareShutdown();
+            achievements_.reportShutdown();
             shutdown_();
             LOG_INFO << "Steam connection shut down";
         }
@@ -2480,6 +2541,15 @@ public:
         if (!initialized_)
             return;
 
+        dispatchCallbacks(false);
+        multiplayer_.updateSessionRegistry();
+        multiplayer_.updateSockets();
+        achievements_.update();
+    }
+
+private:
+    void dispatchCallbacks(bool achievementsOnly)
+    {
         // Manual dispatch is mutually exclusive with SteamAPI_RunCallbacks.
         runFrame_(steamPipe_);
         auto callback = SteamCallbackMessage();
@@ -2497,6 +2567,12 @@ public:
                     achievements_.onStatsReceived(result);
                 else
                     achievements_.onStatsStored(result);
+            }
+
+            if (achievementsOnly)
+            {
+                freeCallback_(steamPipe_);
+                continue;
             }
 
             // 703 = SteamAPICallCompleted_t, containing a call handle, callback ID and size.
@@ -2525,13 +2601,8 @@ public:
 
             freeCallback_(steamPipe_);
         }
-
-        multiplayer_.updateSessionRegistry();
-        multiplayer_.updateSockets();
-        achievements_.update();
     }
 
-private:
     using InitializeFunction = int (CARBON_STEAM_CALL *)(char*);
     using ShutdownFunction = void (CARBON_STEAM_CALL *)();
     using ManualInitFunction = void (CARBON_STEAM_CALL *)();
