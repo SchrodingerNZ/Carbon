@@ -68,13 +68,15 @@ public:
     /** Clear one previously set local platform value. False indicates unsupported or unsuccessful. */
     virtual bool clearPlatformValue(const String& key) { return false; }
 
-    /** Publish an existing local file to platform cloud storage, independently of lobby membership.
-        Local persistence remains the application's responsibility. Unsupported providers do nothing. */
-    virtual void store(const UnicodeString& filename) {}
+    /** Publish persistent files from the $SAVE$/ volume to platform cloud storage.
+        Independent of lobby membership. Local persistence remains the application's responsibility.
+        Does not propagate deletions. Unsupported providers do nothing. */
+    virtual void cloudPersist() {}
 
-    /** Restore a missing local file or update it from a newer platform cloud copy.
-        Never discard local data on failure. Unsupported providers do nothing. */
-    virtual void update(const UnicodeString& filename) {}
+    /** Restore missing local save files or apply newer cloud copies to the $SAVE$/ volume.
+        Does not propagate deletions or overwrite newer local files. Never discard local data on failure.
+        Unsupported providers do nothing. */
+    virtual void cloudUpdate() {}
 
     /** Host freezes the roster and published metadata. Gameplay begins after all participants are ready. */
     virtual bool startGame() { return false; }
