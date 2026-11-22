@@ -27,7 +27,7 @@
 // Native callbacks only enqueue data. The Carbon provider consumes it on update.
 @interface CarbonGameKitMatchDelegate : NSObject<GKMatchDelegate>
 @property(nonatomic, copy) void (^receive)(GKMatch*, NSData*, GKPlayer*);
-@property(nonatomic, copy) void (^failure)(GKMatch*);
+@property(nonatomic, copy) void (^failure)(GKMatch*, GKPlayer*);
 @end
 
 @implementation CarbonGameKitMatchDelegate
@@ -39,12 +39,12 @@
 - (void)match:(GKMatch*)match player:(GKPlayer*)player didChangeConnectionState:(GKPlayerConnectionState)state
 {
     if (state == GKPlayerStateDisconnected && self.failure)
-        self.failure(match);
+        self.failure(match, player);
 }
 - (void)match:(GKMatch*)match didFailWithError:(NSError*)error
 {
     if (self.failure)
-        self.failure(match);
+        self.failure(match, nil);
 }
 @end
 
@@ -558,6 +558,7 @@ struct GameKitMatchMailbox
 {
     GKMatch* match = nil;
     std::vector<GameKitMatchPacket> packets;
+    std::set<std::string> disconnected;
     bool failed = false;
 };
 
@@ -633,6 +634,7 @@ struct GameKitActiveMatch
     std::shared_ptr<GameKitSessionCandidate> candidate;
     CarbonGameKitMatchDelegate* delegate = nil;
     uint64_t accountGeneration = 0;
+    std::vector<std::pair<PlayerID, NetFrame>> earlyFrames;
 
     ~GameKitActiveMatch()
     {
@@ -684,11 +686,16 @@ public:
                 mailbox->packets.push_back(packet);
             });
         };
-        delegate_.failure = ^(GKMatch* match) {
+        delegate_.failure = ^(GKMatch* match, GKPlayer* player) {
             dispatch_async(dispatch_get_main_queue(), ^{
                 auto mailbox = weakMailbox.lock();
                 if (mailbox && mailbox->match == match)
+                {
+                    NSString* identity = gameKitMemberIdentity(player);
+                    if (identity.UTF8String)
+                        mailbox->disconnected.insert(identity.UTF8String);
                     mailbox->failed = true;
+                }
             });
         };
         attempt_->match.delegate = delegate_;
@@ -1160,6 +1167,39 @@ public:
         return true;
     }
 
+    bool send(PlayerID recipient, const NetFrame& frame) override
+    {
+        if (!sessionUsable() || !recipient.isValid() || recipient == getSession().getLocalPlayerID())
+            return false;
+        auto player = nativePlayer(recipient);
+        if (!player)
+        {
+            LOG_WARNING << "GameKit frame recipient unavailable: " << recipient.getValue();
+            return false;
+        }
+        auto data = encodeFrame(frame);
+        return data && submitFrame(data, player);
+    }
+
+    bool broadcast(const NetFrame& frame) override
+    {
+        if (!sessionUsable())
+            return false;
+        auto data = encodeFrame(frame);
+        if (!data)
+            return false;
+        bool success = true;
+        bool any = false;
+        for (unsigned int i = 0; i < getConnectedPlayerCount(); ++i)
+        {
+            any = true;
+            auto player = nativePlayer(getConnectedPlayer(i));
+            if (!player || !submitFrame(data, player))
+                success = false;
+        }
+        return any && success;
+    }
+
     unsigned int getConnectedPlayerCount() const override
     {
         unsigned int count = 0;
@@ -1192,7 +1232,7 @@ public:
             if (!authentication_.isAuthenticated() || active_->accountGeneration != authentication_.getGeneration() ||
                 active_->mailbox->failed)
             {
-                endSession(MultiplayerSessionEndReason::Left);
+                endTransportSession();
                 return;
             }
             updateSession();
@@ -1293,6 +1333,83 @@ private:
     }
 
     std::string sessionPrefix() const { return gameKitSessionPrefix + std::to_string(getSession().getID()) + "|"; }
+
+    GKPlayer* nativePlayer(PlayerID id) const
+    {
+        const auto& destinations = active_->candidate->controller.registry().destinations();
+        const auto found = destinations.find(id.getValue());
+        if (found == destinations.end() || id == getSession().getLocalPlayerID())
+            return nil;
+        for (GKPlayer* player in active_->attempt->match.players)
+        {
+            NSString* identity = gameKitMemberIdentity(player);
+            if (identity.UTF8String && found->second == identity.UTF8String)
+                return player;
+        }
+        return nil;
+    }
+
+    NSData* encodeFrame(const NetFrame& frame) const
+    {
+        Vector<byte_t> data;
+        const auto prefix = sessionPrefix() + (getSession().getState() == MultiplayerSessionState::Playing ? "G|" : "F|");
+        // Match the existing bounded GameKit mailbox, including envelope bytes.
+        if (!frame.encode(data) || data.empty() || prefix.size() + data.size() > 32768)
+        {
+            LOG_WARNING << "GameKit rejected NetFrame encoding or packet size";
+            return nil;
+        }
+        auto packet = [NSMutableData dataWithBytes:prefix.data() length:prefix.size()];
+        [packet appendBytes:data.getData() length:data.size()];
+        return packet;
+    }
+
+    bool submitFrame(NSData* data, GKPlayer* player)
+    {
+        NSError* error = nil;
+        if ([active_->attempt->match sendData:data toPlayers:@[player] dataMode:GKMatchSendDataReliable error:&error])
+            return true;
+        // Preserve the public submission contract: the game decides how to
+        // handle gameplay send failure, unlike authoritative control failure.
+        LOG_WARNING << "GameKit NetFrame submission failed";
+        return false;
+    }
+
+    bool receiveFrame(PlayerID sender, const std::string& message)
+    {
+        NetFrame frame;
+        if (message.size() <= 2 || !NetFrame::decode(reinterpret_cast<const byte_t*>(message.data() + 2),
+                                                   static_cast<unsigned int>(message.size() - 2), frame))
+            return false;
+        // Reliable ordering is per sender, not across the match. A guest may
+        // already have received Playing from the host while another has not.
+        if (message[0] == 'G' && getSession().getState() != MultiplayerSessionState::Playing)
+        {
+            auto& frames = active_->earlyFrames;
+            if (frames.size() >= 256)
+                return false;
+            frames.emplace_back(sender, std::move(frame));
+            return true;
+        }
+        dispatchNetFrame(sender, frame);
+        return true;
+    }
+
+    void drainEarlyFrames()
+    {
+        if (!sessionUsable() || getSession().getState() != MultiplayerSessionState::Playing)
+            return;
+        auto active = active_;
+        const auto generation = generation_;
+        std::vector<std::pair<PlayerID, NetFrame>> frames;
+        frames.swap(active->earlyFrames);
+        for (const auto& frame : frames)
+        {
+            if (generation != generation_ || active_ != active || !sessionUsable())
+                return;
+            dispatchNetFrame(frame.first, frame.second);
+        }
+    }
 
     bool sendControl(const std::string& message)
     {
@@ -1432,6 +1549,8 @@ private:
         const auto found = assignments.find(sender);
         if (found == assignments.end() || sender == localMember())
             return false;
+        if (message.size() >= 2 && message[1] == '|' && (message[0] == 'F' || message[0] == 'G'))
+            return receiveFrame(PlayerID(found->second), message);
         if (message.size() >= 2 && message[1] == '|' &&
             (message[0] == 'L' || message[0] == 'S' || message[0] == 'P'))
         {
@@ -1456,9 +1575,12 @@ private:
         const auto generation = generation_;
         if (!nativeRosterIntact())
         {
-            endSession(MultiplayerSessionEndReason::Left);
+            endTransportSession();
             return;
         }
+        drainEarlyFrames();
+        if (generation != generation_ || active_ != active || !sessionUsable())
+            return;
         std::vector<GameKitMatchPacket> packets;
         packets.swap(active->mailbox->packets);
         for (const auto& packet : packets)
@@ -1467,10 +1589,13 @@ private:
                 return;
             if (!receiveControl(packet))
             {
-                LOG_WARNING << "GameKit invalid session control packet";
+                LOG_WARNING << "GameKit invalid session packet";
                 endSession(MultiplayerSessionEndReason::Left);
                 return;
             }
+            if (generation != generation_ || active_ != active || !sessionUsable())
+                return;
+            drainEarlyFrames();
         }
         if (generation != generation_ || active_ != active || !sessionUsable())
             return;
@@ -1517,6 +1642,47 @@ private:
         dispatchSessionUpdated();
         if (generation == generation_ && active_ == ready)
             dispatchOperationCompleted(operation, true);
+    }
+
+    void endTransportSession()
+    {
+        if (!active_)
+            return;
+        const auto active = active_;
+        const auto generation = generation_;
+        const auto local = getSession().getLocalPlayerID();
+        const auto host = getSession().getHostPlayerID();
+        auto reason = MultiplayerSessionEndReason::Left;
+        Vector<MultiplayerPlayer> roster;
+        std::vector<PlayerID> disconnected;
+        const auto& members = active->candidate->controller.registry().destinations();
+        for (unsigned int i = 0; i < getSession().getPlayerCount(); ++i)
+        {
+            const auto& player = *getSession().getPlayer(i);
+            const auto id = player.getID();
+            const auto member = members.find(id.getValue());
+            const bool lost = id != local && (member == members.end() || !nativePlayer(id) ||
+                active->mailbox->disconnected.count(member->second));
+            if (lost && id == host)
+                reason = MultiplayerSessionEndReason::HostLost;
+            if (lost && player.getConnectionState() == MultiplayerConnectionState::Connected)
+            {
+                disconnected.push_back(id);
+                roster.append(MultiplayerPlayer(id, player.getName(), MultiplayerConnectionState::Disconnected));
+            }
+            else
+                roster.append(player);
+        }
+        // Update the snapshot before callbacks, and block sends during teardown.
+        active->mailbox->failed = true;
+        mutableSession().setPlayers(roster);
+        for (auto id : disconnected)
+        {
+            dispatchPlayerConnectionStateChanged(id, MultiplayerConnectionState::Connected, MultiplayerConnectionState::Disconnected);
+            if (generation != generation_ || active_ != active)
+                return;
+        }
+        endSession(reason);
     }
 
     void endSession(MultiplayerSessionEndReason reason)
