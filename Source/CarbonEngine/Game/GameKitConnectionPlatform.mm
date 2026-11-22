@@ -7,6 +7,7 @@
 #ifdef APPLE
 
 #include "CarbonEngine/Game/ConnectionPlatformInterface.h"
+#include "CarbonEngine/Game/SessionController.hpp"
 
 #undef new
 #include <GameKit/GameKit.h>
@@ -560,6 +561,59 @@ struct GameKitMatchMailbox
     bool failed = false;
 };
 
+// A private candidate uses the same registry and manifest machinery as Steam.
+// It is not the application's public session until the transport is ready.
+struct GameKitSessionCandidate
+{
+    SessionDetail::SessionController<std::string> controller;
+    MultiplayerSession session;
+    std::string manifest;
+
+    bool initialize(uint64_t sessionID, const std::string& host, const std::string& local,
+                    const std::map<std::string, std::string>& names)
+    {
+        if (session.getID() || !sessionID || host.empty() || local.empty() || names.size() < 2 || names.size() > 32 ||
+            names.count(host) != 1 || names.count(local) != 1)
+            return false;
+        for (const auto& entry : names)
+            if (entry.first.empty() || entry.second.empty())
+                return false;
+
+        auto& registry = controller.registry();
+        // Every peer has agreed on the native roster. Allocate the host first
+        // and the rest in canonical byte order (not localized display order).
+        const PlayerID hostID(registry.assign(host));
+        for (const auto& entry : names)
+            registry.assign(entry.first);
+
+        SessionDetail::SessionPlayerRegistry<std::string>::DestinationMap destinations;
+        for (const auto& entry : names)
+            destinations.emplace(registry.assign(entry.first), entry.first);
+        Vector<MultiplayerPlayer> players;
+        for (const auto& entry : destinations)
+            players.append(MultiplayerPlayer(PlayerID(entry.first), String(names.at(entry.second).c_str()),
+                                             MultiplayerConnectionState::Connected));
+        const PlayerID localID(registry.assign(local));
+        controller.enterLobby(session, sessionID);
+        controller.reconcileRoster(session, sessionID, host == local, hostID, localID, players, destinations);
+
+        using Codec = SessionDetail::SessionManifestCodec;
+        const auto encodeIdentity = [](const std::string& member) { return Codec::encodeManifestName(member); };
+        const auto getName = [&names](const std::string& member) { return names.at(member); };
+        manifest = Codec::appendSessionMetadata(Codec::buildRoster(destinations, encodeIdentity, getName),
+                                                MultiplayerSessionMetadata());
+        MultiplayerSessionMetadata metadata;
+        std::string reconstructed;
+        return controller.validateManifest(session, manifest, encodeIdentity, getName, metadata, reconstructed) ==
+               SessionDetail::SessionController<std::string>::ManifestValidation::Valid;
+    }
+
+    std::string agreementKey() const
+    {
+        return std::to_string(session.getID()) + "|" + manifest;
+    }
+};
+
 // A fixed native roster must agree on the full protocol version, exactly one
 // creator, and the same host identity before it can become a Carbon session.
 // Hello and acknowledgement packets carry the same immutable participant intent.
@@ -628,6 +682,7 @@ public:
         hostIdentity_ = nil;
         intents_.clear();
         acknowledgements_.clear();
+        candidate_.reset();
         ready_ = false;
         sentAcknowledgement_ = false;
     }
@@ -638,6 +693,7 @@ public:
     MultiplayerOperationFailureReason getFailureReason() const { return failureReason_; }
     NSString* getHostIdentity() const { return hostIdentity_; }
     NSArray<NSString*>* getRoster() const { return roster_; }
+    std::shared_ptr<GameKitSessionCandidate> getCandidate() const { return ready_ ? candidate_ : nullptr; }
 
     void update()
     {
@@ -673,7 +729,20 @@ public:
         {
             roster_ = roster;
             const bool creator = attempt_->operation == MultiplayerOperation::CreateLobby;
-            intents_.emplace(key(localIdentity_), Intent(creator, creator ? attempt_->maxMembers : 0));
+            NSString* name = [GKLocalPlayer localPlayer].displayName;
+            if (!validString(name, 512))
+                name = @"Player";
+            // Only the creator supplies the session identifier. It is independent
+            // of the native match object and changes on each creation attempt.
+            uint64_t sessionID = 0;
+            if (creator)
+            {
+                arc4random_buf(&sessionID, sizeof(sessionID));
+                if (!sessionID)
+                    sessionID = 1;
+            }
+            intents_.emplace(key(localIdentity_), Intent(creator, creator ? attempt_->maxMembers : 0,
+                                                        key(name), sessionID));
         }
         std::vector<GameKitMatchPacket> packets;
         packets.swap(mailbox_->packets);
@@ -703,12 +772,18 @@ public:
                 reject("match requires exactly one creator");
                 return;
             }
+            if (!prepareCandidate())
+            {
+                reject("invalid Carbon session candidate");
+                return;
+            }
         }
-        if (hostIdentity_)
+        if (candidate_)
             for (const auto& acknowledgement : acknowledgements_)
-                if (acknowledgement.second != key(hostIdentity_))
+                if (acknowledgement.second.first != key(hostIdentity_) ||
+                    acknowledgement.second.second != candidate_->agreementKey())
                 {
-                    reject("participants disagree on host");
+                    reject("participants disagree on Carbon session candidate");
                     return;
                 }
 
@@ -720,8 +795,16 @@ public:
             if (sendIntent() && hostIdentity_)
                 sentAcknowledgement_ = true;
         }
-        if (hostIdentity_ && sentAcknowledgement_ && acknowledgements_.size() + 1 == roster_.count)
+        if (candidate_ && sentAcknowledgement_ && acknowledgements_.size() + 1 == roster_.count)
         {
+            // Every member has acknowledged the exact initial manifest. This is
+            // lobby agreement only; Syncing will require fresh confirmations and
+            // independent gameplay readiness via SessionController.
+            auto& agreement = candidate_->controller.agreement();
+            agreement.publish(1, candidate_->manifest, key(localIdentity_));
+            for (const auto& entry : acknowledgements_)
+                agreement.confirmMember(entry.first);
+            agreement.markLocalConfirmation(1, MultiplayerSessionState::Lobby);
             ready_ = true;
             LOG_INFO << "GameKit match negotiation completed";
         }
@@ -731,9 +814,12 @@ private:
     using Clock = std::chrono::steady_clock;
     struct Intent
     {
-        Intent(bool c, unsigned int n) : creator(c), capacity(n) {}
+        Intent(bool c, unsigned int n, const std::string& displayName, uint64_t id)
+            : creator(c), capacity(n), name(displayName), sessionID(id) {}
         bool creator;
         unsigned int capacity;
+        std::string name;
+        uint64_t sessionID;
     };
 
     static std::string key(NSString* value) { return value.UTF8String ? value.UTF8String : ""; }
@@ -767,14 +853,47 @@ private:
         }];
     }
 
+    bool prepareCandidate()
+    {
+        const auto host = key(hostIdentity_);
+        const auto local = key(localIdentity_);
+        const auto hostIntent = intents_.find(host);
+        if (hostIntent == intents_.end() || !hostIntent->second.sessionID)
+            return false;
+
+        std::map<std::string, std::string> names;
+        for (NSString* identity in roster_)
+        {
+            const auto member = key(identity);
+            const auto found = intents_.find(member);
+            if (found == intents_.end())
+                return false;
+            // Use Carbon's existing NSString-to-String conversion uniformly.
+            // The manifest must contain exactly the same bytes as the snapshot.
+            String name([NSString stringWithUTF8String:found->second.name.c_str()]);
+            if (!name.length())
+                name = "Player";
+            if (!names.emplace(member, std::string(name.cStr(), name.length())).second)
+                return false;
+        }
+        auto candidate = std::make_shared<GameKitSessionCandidate>();
+        if (names.size() != roster_.count || !candidate->initialize(hostIntent->second.sessionID, host, local, names))
+            return false;
+        candidate_ = candidate;
+        return true;
+    }
+
     bool sendIntent()
     {
         const auto& intent = intents_.at(key(localIdentity_));
         auto version = [NSString stringWithUTF8String:attempt_->networkVersion.cStr()];
         if (!validString(version, 256))
             return false;
-        NSArray* message = @[@"CarbonGK1", version, @(intent.creator ? 1 : 0), @(intent.capacity), roster_,
-                             hostIdentity_ ? hostIdentity_ : @""];
+        auto name = [NSString stringWithUTF8String:intent.name.c_str()];
+        auto sessionID = [NSString stringWithUTF8String:std::to_string(intent.sessionID).c_str()];
+        auto agreement = candidate_ ? [NSString stringWithUTF8String:candidate_->agreementKey().c_str()] : @"";
+        NSArray* message = @[@"CarbonGK2", version, @(intent.creator ? 1 : 0), @(intent.capacity), roster_,
+                             hostIdentity_ ? hostIdentity_ : @"", name, sessionID, agreement];
         auto data = [NSJSONSerialization dataWithJSONObject:message options:0 error:nullptr];
         if (!data || data.length > 32768)
             return false;
@@ -792,37 +911,48 @@ private:
         if (![roster_ containsObject:sender])
             return false;
         id decoded = [NSJSONSerialization JSONObjectWithData:packet.data options:0 error:nullptr];
-        if (![decoded isKindOfClass:[NSArray class]] || [(NSArray*)decoded count] != 6)
+        if (![decoded isKindOfClass:[NSArray class]] || [(NSArray*)decoded count] != 9)
             return false;
         NSArray* fields = decoded;
-        if (![@"CarbonGK1" isEqual:fields[0]] || !validString(fields[1], 256) ||
+        if (![@"CarbonGK2" isEqual:fields[0]] || !validString(fields[1], 256) ||
             ![fields[1] isEqualToString:[NSString stringWithUTF8String:attempt_->networkVersion.cStr()]] ||
             ![fields[2] isKindOfClass:[NSNumber class]] || ![fields[3] isKindOfClass:[NSNumber class]] ||
             ![fields[4] isKindOfClass:[NSArray class]] || ![roster_ isEqualToArray:fields[4]] ||
-            ![fields[5] isKindOfClass:[NSString class]])
+            ![fields[5] isKindOfClass:[NSString class]] || !validString(fields[6], 512) ||
+            !validString(fields[7], 20) || ![fields[8] isKindOfClass:[NSString class]])
             return false;
         const double role = [fields[2] doubleValue];
         const double capacity = [fields[3] doubleValue];
         if ((role != 0 && role != 1) || (role == 0 && capacity != 0) ||
             (role == 1 && !(capacity >= 2 && capacity <= 32 && std::floor(capacity) == capacity)))
             return false;
-        const Intent intent(role == 1, static_cast<unsigned int>(capacity));
+        const auto suppliedID = key(fields[7]);
+        char* end = nullptr;
+        const auto sessionID = std::strtoull(suppliedID.c_str(), &end, 10);
+        if (!end || *end || std::to_string(sessionID) != suppliedID || bool(sessionID) != (role == 1))
+            return false;
+        const Intent intent(role == 1, static_cast<unsigned int>(capacity), key(fields[6]), sessionID);
         const auto identity = key(sender);
         auto existing = intents_.find(identity);
-        if (existing != intents_.end() && (existing->second.creator != intent.creator || existing->second.capacity != intent.capacity))
+        if (existing != intents_.end() && (existing->second.creator != intent.creator ||
+            existing->second.capacity != intent.capacity || existing->second.name != intent.name ||
+            existing->second.sessionID != intent.sessionID))
             return false;
         intents_.emplace(identity, intent);
         NSString* host = fields[5];
+        NSString* agreement = fields[8];
         if (host.length)
         {
-            if (![roster_ containsObject:host])
+            if (![roster_ containsObject:host] || !validString(agreement, 32768))
                 return false;
-            const auto proposed = key(host);
+            const auto proposed = std::make_pair(key(host), key(agreement));
             auto previous = acknowledgements_.find(identity);
             if (previous != acknowledgements_.end() && previous->second != proposed)
                 return false;
             acknowledgements_.emplace(identity, proposed);
         }
+        else if (agreement.length)
+            return false;
         return true;
     }
 
@@ -842,7 +972,8 @@ private:
     NSString* localIdentity_ = nil;
     NSString* hostIdentity_ = nil;
     std::map<std::string, Intent> intents_;
-    std::map<std::string, std::string> acknowledgements_;
+    std::map<std::string, std::pair<std::string, std::string>> acknowledgements_;
+    std::shared_ptr<GameKitSessionCandidate> candidate_;
     Clock::time_point started_ = Clock::now();
     Clock::time_point nextSend_ = Clock::now();
     bool ready_ = false;
