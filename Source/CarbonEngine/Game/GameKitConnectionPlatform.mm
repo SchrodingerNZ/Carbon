@@ -408,14 +408,122 @@ private:
     Clock::time_point loadStarted_ = Clock::now();
 };
 
-class GameKitMultiplayer : public MultiplayerInterface
+// A native match is only a transport candidate. It does not become a Carbon
+// lobby until role negotiation and network-version agreement have succeeded.
+struct GameKitMatchmakingAttempt
+{
+    MultiplayerOperation operation = MultiplayerOperation::FindLobby;
+    String networkVersion;
+    unsigned int maxMembers = 0;
+    GKMatch* match = nil;
+    bool completed = false;
+    bool failed = false;
+};
+
+class GameKitMatchmaking
 {
 public:
-    explicit GameKitMultiplayer(const GameKitAuthentication& authentication) : authentication_(authentication) {}
-    String getLocalPlayerName() const override { return authentication_.getPlayerName(); }
+    explicit GameKitMatchmaking(const GameKitAuthentication& authentication) : authentication_(authentication) {}
+    ~GameKitMatchmaking() { cancel(); }
+
+    // min/max describe the native matching request, not a published Carbon roster.
+    // The caller will choose these when the role negotiation policy is implemented.
+    bool begin(MultiplayerOperation operation, const String& version, unsigned int minMembers, unsigned int maxMembers)
+    {
+        if (![NSThread isMainThread] || !authentication_.isAuthenticated() || attempt_ ||
+            (operation != MultiplayerOperation::CreateLobby && operation != MultiplayerOperation::FindLobby) ||
+            !*version.cStr() || minMembers < 2 || maxMembers < minMembers ||
+            maxMembers > [GKMatchRequest maxPlayersAllowedForMatchOfType:GKMatchTypePeerToPeer])
+            return false;
+
+        auto request = [[GKMatchRequest alloc] init];
+        request.minPlayers = minMembers;
+        request.maxPlayers = maxMembers;
+        // Stable, provider-private partition by protocol version. Negotiation must
+        // still compare the full version string, since this hash can collide.
+        uint32_t group = 2166136261u;
+        for (auto p = version.cStr(); *p; ++p)
+            group = (group ^ static_cast<unsigned char>(*p)) * 16777619u;
+        request.playerGroup = group & 0x7fffffffu;
+
+        attempt_ = std::make_shared<GameKitMatchmakingAttempt>();
+        attempt_->operation = operation;
+        attempt_->networkVersion = version;
+        attempt_->maxMembers = maxMembers;
+        generation_ = authentication_.getGeneration();
+        const std::weak_ptr<GameKitMatchmakingAttempt> weakAttempt(attempt_);
+        [[GKMatchmaker sharedMatchmaker] findMatchForRequest:request withCompletionHandler:^(GKMatch* match, NSError* error) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                auto attempt = weakAttempt.lock();
+                if (!attempt)
+                {
+                    // A cancelled request may still produce a native match.
+                    [match disconnect];
+                    return;
+                }
+                attempt->failed = error != nil || match == nil;
+                if (attempt->failed)
+                    [match disconnect];
+                else
+                    attempt->match = match;
+                attempt->completed = true;
+            });
+        }];
+        return true;
+    }
+
+    void cancel()
+    {
+        if (!attempt_)
+            return;
+        const auto pending = !attempt_->completed;
+        auto match = attempt_->match;
+        // Invalidate the mailbox before asking GameKit to cancel the operation.
+        attempt_.reset();
+        if (pending)
+            [[GKMatchmaker sharedMatchmaker] cancel];
+        [match disconnect];
+    }
+
+    void update()
+    {
+        if (attempt_ && (!authentication_.isAuthenticated() || generation_ != authentication_.getGeneration()))
+            cancel();
+    }
+
+    bool isPending() const { return bool(attempt_); }
+
+    // Transfer ownership of a completed native request to the negotiation stage.
+    // That stage must install the match delegate and own subsequent disconnection.
+    std::shared_ptr<GameKitMatchmakingAttempt> takeCompleted()
+    {
+        if (!attempt_ || !attempt_->completed)
+            return nullptr;
+        auto result = attempt_;
+        attempt_.reset();
+        return result;
+    }
 
 private:
     const GameKitAuthentication& authentication_;
+    uint64_t generation_ = 0;
+    std::shared_ptr<GameKitMatchmakingAttempt> attempt_;
+};
+
+class GameKitMultiplayer : public MultiplayerInterface
+{
+public:
+    explicit GameKitMultiplayer(const GameKitAuthentication& authentication)
+        : authentication_(authentication), matchmaking_(authentication) {}
+    String getLocalPlayerName() const override { return authentication_.getPlayerName(); }
+
+    void update() { matchmaking_.update(); }
+
+    // Public matchmaking remains unavailable until the negotiation and transport
+    // stages can establish a valid Carbon session and dispatch completion events.
+private:
+    const GameKitAuthentication& authentication_;
+    GameKitMatchmaking matchmaking_;
 };
 
 class GameKitConnectionPlatform : public ConnectionPlatformInterface
@@ -427,6 +535,7 @@ public:
     {
         authentication_.update();
         achievements_.update();
+        multiplayer_.update();
     }
 
     AchievementInterface& getAchievements() override { return achievements_; }
