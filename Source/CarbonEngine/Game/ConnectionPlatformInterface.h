@@ -70,10 +70,13 @@ public:
 
     /** Publish persistent files from the $SAVE$/ volume to platform cloud storage.
         Independent of lobby membership. Local persistence remains the application's responsibility.
+        Synchronous: call after closing local save files, with no concurrent save writes.
+        Providers may skip nonportable filenames, links, hidden metadata or oversized files.
         Does not propagate deletions. Unsupported providers do nothing. */
     virtual void cloudPersist() {}
 
     /** Restore missing local save files or apply newer cloud copies to the $SAVE$/ volume.
+        Synchronous: call before opening local saves, with no concurrent save writes.
         Does not propagate deletions or overwrite newer local files. Never discard local data on failure.
         Unsupported providers do nothing. */
     virtual void cloudUpdate() {}

@@ -33,10 +33,11 @@ namespace Carbon
  * There is a special file system volume called SAVE which should be used to store any data the client application
  * wishes to save across executions, e.g. saved games. This volume can be accessed using the "$SAVE$/" prefix on
  * filenames, the same way as for any file system volume. The $SAVE$ file system volume will always map to a proper
- * location for the storage of this kind of persistent per-user data on the active platform. The engine will never alter
- * the contents of $SAVE$, and the application is expected to manage any files and folders that it chooses to create
- * inside the volume. On Windows $SAVE$/ maps to "%APPDATA%/<application name>/Save", on macOS $SAVE$/ maps to
- * "~/Library/Preferences/<application name>/Save", and on Linux $SAVE$/ maps to "~/.<application name>/Save".
+ * location for the storage of this kind of persistent per-user data on the active platform. Apart from explicit platform
+ * cloud restoration requests, the engine does not alter the contents of $SAVE$, and the application is expected to
+ * manage any files and folders that it chooses to create inside the volume. On Windows $SAVE$/ maps to
+ * "%APPDATA%/<application name>/Save", on macOS to "~/Library/Preferences/<application name>/Save", and on Linux
+ * to "~/.<application name>/Save".
  *
  * File system access is thread-safe, and there is support for asynchromous loading of files through
  * FileSystem::openAsync().

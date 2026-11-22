@@ -11,6 +11,12 @@
 #include "CarbonEngine/Game/SessionManifestCodec.hpp"
 #include "CarbonEngine/Game/SessionController.hpp"
 
+#if defined(WINDOWS) || defined(MACOS)
+    #include "CarbonEngine/Core/FileSystem/FileSystem.h"
+    #include "CarbonEngine/Core/FileSystem/LocalDirectoryFileSystemVolume.h"
+    #include "CarbonEngine/Game/CloudSaveFileSystem.hpp"
+#endif
+
 #include <algorithm>
 #include <chrono>
 #include <cstddef>
@@ -131,6 +137,8 @@ private:
 CARBON_REGISTER_INTERFACE_IMPLEMENTATION(ConnectionPlatformInterface, NullConnectionPlatform, 1)
 
 #if defined(WINDOWS) || defined(MACOS)
+
+namespace CloudFS = CloudSaveFileSystem;
 
 // Keep the Steam flat API calling convention platform-neutral without exposing Steamworks headers.
 #ifdef WINDOWS
@@ -573,6 +581,9 @@ public:
     }
 
     ~SteamMultiplayer() override = default;
+
+    void cloudPersist() override { synchronizeCloud(true); }
+    void cloudUpdate() override { synchronizeCloud(false); }
 
     bool isAvailable() const override { return available_; }
 
@@ -1929,6 +1940,205 @@ public:
     }
 
 private:
+    // Use the mounted SAVE volume, not an assumed application data directory. This also avoids syncing
+    // a different directory if the application has replaced the default volume.
+    std::string cloudSaveRoot() const
+    {
+        const auto volume = dynamic_cast<const LocalDirectoryFileSystemVolume*>(fileSystem().getVolume("SAVE"));
+        if (!volume)
+            return {};
+        const auto text = volume->getLocalDirectory().toUTF8();
+        std::string root(text.as<char>());
+        std::replace(root.begin(), root.end(), '\\', '/');
+        while (!root.empty() && root.back() == '/')
+            root.pop_back();
+#ifdef WINDOWS
+        if (root.size() <= 3 || (root[1] != ':' && root.compare(0, 2, "//") != 0))
+            return {};
+        if (root[1] == ':' && root[2] != '/')
+            return {};
+#else
+        if (root.empty() || root.front() != '/')
+            return {};
+#endif
+        return root;
+    }
+
+    bool enumerateCloudSaves(std::vector<std::string>& files) const
+    {
+        const auto count = cloudFileCount_(remoteStorage_);
+        if (count < 0)
+            return false;
+        const std::string prefix = CloudFS::Prefix;
+        for (int32_t i = 0; i < count; ++i)
+        {
+            int32_t size = 0;
+            const auto name = cloudFileNameAndSize_(remoteStorage_, i, &size);
+            if (!name || !*name || size < 0)
+                return false;
+            const std::string key(name);
+            if (key.compare(0, prefix.size(), prefix) != 0)
+                continue;
+            const auto relative = key.substr(prefix.size());
+            if (CloudFS::validRelativePath(relative))
+                files.push_back(relative);
+            else
+                LOG_WARNING_WITHOUT_CALLER << "Steam cloud: ignoring unsupported cloud path " << key.c_str();
+        }
+        return true;
+    }
+
+    bool readCloudSave(const std::string& key, CloudFS::Bytes& bytes, CloudFS::Info& version) const
+    {
+        if (!cloudFileExists_(remoteStorage_, key.c_str()))
+            return false;
+        const auto size = cloudFileSize_(remoteStorage_, key.c_str());
+        const auto stamp = cloudFileTimestamp_(remoteStorage_, key.c_str());
+        if (size < static_cast<int32_t>(CloudFS::HeaderSize) ||
+            size > static_cast<int32_t>(CloudFS::MaxObjectSize) || stamp <= 0)
+            return false;
+        bytes.resize(static_cast<size_t>(size));
+        // Never interpret a failed or partial read as a valid empty save.
+        return cloudFileRead_(remoteStorage_, key.c_str(), bytes.data(), size) == size &&
+               cloudFileExists_(remoteStorage_, key.c_str()) &&
+               cloudFileSize_(remoteStorage_, key.c_str()) == size &&
+               cloudFileTimestamp_(remoteStorage_, key.c_str()) == stamp && CloudFS::decode(bytes, version);
+    }
+
+    void persistCloudSave(const std::string& root, const std::string& relative, bool listedInCloud)
+    {
+        if (!isCloudStorageAvailable())
+            return;
+        const auto path = CloudFS::join(root, relative);
+        const auto local = CloudFS::inspectRelative(root, relative);
+        CloudFS::Bytes payload;
+        if (!CloudFS::read(path, local, payload))
+        {
+            LOG_WARNING_WITHOUT_CALLER << "Steam cloud: could not read local save " << relative.c_str();
+            return;
+        }
+        const auto key = std::string(CloudFS::Prefix) + relative;
+        if (listedInCloud || cloudFileExists_(remoteStorage_, key.c_str()))
+        {
+            CloudFS::Bytes existing;
+            CloudFS::Info version;
+            if (!readCloudSave(key, existing, version))
+            {
+                LOG_WARNING_WITHOUT_CALLER << "Steam cloud: existing cloud save unreadable, preserving both copies: "
+                                           << relative.c_str();
+                return;
+            }
+            if (CloudFS::samePayload(payload, existing, version))
+                return;
+            if (!CloudFS::newer(local, version))
+            {
+                LOG_WARNING_WITHOUT_CALLER << "Steam cloud: cloud save is newer or equally dated; not publishing "
+                                           << relative.c_str();
+                return;
+            }
+        }
+        const auto data = CloudFS::encode(local, payload);
+        if (!CloudFS::sameVersion(local, CloudFS::inspectRelative(root, relative)) || !isCloudStorageAvailable())
+        {
+            LOG_WARNING_WITHOUT_CALLER << "Steam cloud: local save changed or cloud disabled; not publishing "
+                                       << relative.c_str();
+            return;
+        }
+        if (cloudFileWrite_(remoteStorage_, key.c_str(), data.data(), static_cast<int32_t>(data.size())))
+            LOG_INFO << "Steam cloud: published " << relative.c_str();
+        else
+            LOG_WARNING_WITHOUT_CALLER << "Steam cloud: could not publish " << relative.c_str();
+    }
+
+    void updateCloudSave(const std::string& root, const std::string& relative)
+    {
+        if (!isCloudStorageAvailable())
+            return;
+        const auto local = CloudFS::inspectRelative(root, relative);
+        if (local.kind != CloudFS::Kind::Missing && local.kind != CloudFS::Kind::File)
+        {
+            LOG_WARNING_WITHOUT_CALLER << "Steam cloud: unsafe local save path " << relative.c_str();
+            return;
+        }
+        CloudFS::Bytes data;
+        CloudFS::Info version;
+        const auto key = std::string(CloudFS::Prefix) + relative;
+        if (!readCloudSave(key, data, version))
+        {
+            LOG_WARNING_WITHOUT_CALLER << "Steam cloud: could not read cloud save " << relative.c_str();
+            return;
+        }
+        if (local.kind == CloudFS::Kind::File)
+        {
+            if (!CloudFS::validTime(local) || CloudFS::newer(local, version))
+                return;
+            CloudFS::Bytes payload;
+            if (!CloudFS::read(CloudFS::join(root, relative), local, payload))
+            {
+                LOG_WARNING_WITHOUT_CALLER << "Steam cloud: could not verify local save " << relative.c_str();
+                return;
+            }
+            if (CloudFS::samePayload(payload, data, version))
+                return;
+            if (!CloudFS::newer(version, local))
+            {
+                LOG_WARNING_WITHOUT_CALLER << "Steam cloud: equally dated saves differ; preserving both copies: "
+                                           << relative.c_str();
+                return;
+            }
+        }
+        if (!isCloudStorageAvailable())
+            return;
+        if (CloudFS::replace(root, relative, local, version, data.data() + CloudFS::HeaderSize,
+                             static_cast<size_t>(version.size)))
+            LOG_INFO << "Steam cloud: restored " << relative.c_str();
+        else
+            LOG_WARNING_WITHOUT_CALLER << "Steam cloud: could not restore save safely " << relative.c_str();
+    }
+
+    void synchronizeCloud(bool persist)
+    {
+        if (!isCloudStorageAvailable())
+            return;
+        // Both calls are synchronous and are intended for quiescent application save/load points.
+        // No session state, callbacks or multiplayer transport participate in this operation.
+        try
+        {
+            const auto root = cloudSaveRoot();
+            std::vector<std::string> localFiles;
+            std::vector<std::string> cloudFiles;
+            if (root.empty() || !CloudFS::enumerate(root, {}, localFiles) || !enumerateCloudSaves(cloudFiles))
+            {
+                LOG_WARNING_WITHOUT_CALLER << "Steam cloud: save directory enumeration failed; skipping synchronization";
+                return;
+            }
+            CloudFS::PathIndex index;
+            for (const auto& name : localFiles)
+                index.add(name);
+            for (const auto& name : cloudFiles)
+                index.add(name);
+            const std::set<std::string> remoteNames(cloudFiles.begin(), cloudFiles.end());
+            const auto& candidates = persist ? localFiles : cloudFiles;
+            for (const auto& name : candidates)
+            {
+                if (!index.accepts(name))
+                {
+                    LOG_WARNING_WITHOUT_CALLER << "Steam cloud: ambiguous case for save path " << name.c_str();
+                    continue;
+                }
+                if (persist)
+                    persistCloudSave(root, name, remoteNames.count(name) != 0);
+                else
+                    updateCloudSave(root, name);
+            }
+        }
+        catch (...)
+        {
+            // Optional persistence must not interrupt ordinary game progress or multiplayer.
+            LOG_WARNING_WITHOUT_CALLER << "Steam cloud: save synchronization failed";
+        }
+    }
+
     void initializeCloudStorage(const SharedLibrary& library)
     {
         auto getRemoteStorage = library.mapFunction<GetRemoteStorageFunction>("SteamAPI_SteamRemoteStorage_v016");
