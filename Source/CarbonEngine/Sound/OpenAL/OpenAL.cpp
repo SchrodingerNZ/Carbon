@@ -169,30 +169,57 @@ void OpenAL::clear()
             deleteSource(sources_[i--]);
     }
 
-    // Report any leaked sources and buffers
-    Globals::increaseLeakedResourceCount(sources_.size() + buffers_.size());
+    // Report application-owned sources before reclaiming them. Release their shader references
+    // before clearing the shader manager, which in turn releases its buffer references.
+    Globals::increaseLeakedResourceCount(sources_.size());
     if (!sources_.empty())
         LOG_WARNING << "Unreleased source count: " << sources_.size();
+
+    while (!sources_.empty())
+        deleteSource(sources_.back());
+
+    soundShaders().clear();
+
+    // Only buffers still referenced after shader cleanup are leaked application resources.
+    Globals::increaseLeakedResourceCount(buffers_.size());
     if (!buffers_.empty())
         LOG_WARNING << "Unreleased buffer count: " << buffers_.size();
 
-    // Clear out the sound shaders
-    soundShaders().clear();
-
-    sources_.clear();
+    for (auto buffer : buffers_)
+    {
+        if (buffer->alID)
+            alBufferDeleteQueue_.append(buffer->alID);
+        delete buffer;
+    }
     buffers_.clear();
 
-    clearALDeleteQueues();
+    // The worker has stopped, but its final results may not have been consumed by an update.
+    {
+        auto lock = ScopedMutexLock(mutex_);
+        for (const auto& job : completedSoundLoadThreadJobs_)
+        {
+            if (job.second)
+                alBufferDeleteQueue_.append(job.second);
+        }
+        completedSoundLoadThreadJobs_.clear();
+    }
+
+    // Sources must be deleted before their attached buffers, while the context is still valid.
+    if (alcContext_)
+        clearALDeleteQueues();
 
     // Close OpenAL
     if (alcContext_)
     {
+        if (alcGetCurrentContext() == alcContext_ && !alcMakeContextCurrent(nullptr))
+            LOG_WARNING << "Failed detaching OpenAL context";
         alcDestroyContext(alcContext_);
         alcContext_ = nullptr;
     }
     if (alcDevice_)
     {
-        alcCloseDevice(alcDevice_);
+        if (!alcCloseDevice(alcDevice_))
+            LOG_WARNING << "Failed closing OpenAL device";
         alcDevice_ = nullptr;
     }
 
