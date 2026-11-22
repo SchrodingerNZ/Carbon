@@ -67,6 +67,12 @@ void MultiplayerInterface::dispatchOperationCompleted(MultiplayerOperation opera
     events().dispatchEvent(MultiplayerOperationCompletedEvent(operation, succeeded));
 }
 
+void MultiplayerInterface::dispatchOperationCompleted(MultiplayerOperation operation,
+                                                        MultiplayerOperationFailureReason reason)
+{
+    events().dispatchEvent(MultiplayerOperationCompletedEvent(operation, reason));
+}
+
 void MultiplayerInterface::dispatchNetFrame(PlayerID sender, const NetFrame& frame)
 {
     // The event owns a copy of the decoded frame for the duration of dispatch.
@@ -1718,7 +1724,7 @@ public:
                                                               : pendingGuestOperation_;
             pendingRole_ = Role::None;
             requestedLobbyID_ = 0;
-            dispatchOperationCompleted(operation, false);
+            dispatchOperationCompleted(operation, MultiplayerOperationFailureReason::LobbyEntryFailed);
             return;
         }
 
@@ -1730,7 +1736,8 @@ public:
                 leaveLobby_(matchmaking_, enteredID);
                 pendingLobbyCall_ = 0;
                 pendingRole_ = Role::None;
-                dispatchOperationCompleted(MultiplayerOperation::CreateLobby, false);
+                dispatchOperationCompleted(MultiplayerOperation::CreateLobby,
+                                           MultiplayerOperationFailureReason::LobbyConfigurationFailed);
                 return;
             }
         }
@@ -1744,7 +1751,7 @@ public:
                 pendingLobbyCall_ = 0;
                 pendingRole_ = Role::None;
                 requestedLobbyID_ = 0;
-                dispatchOperationCompleted(pendingGuestOperation_, false);
+                dispatchOperationCompleted(pendingGuestOperation_, MultiplayerOperationFailureReason::IncompatibleNetworkVersion);
                 return;
             }
         }
@@ -1816,7 +1823,7 @@ public:
             if (!success || ioFailed)
             {
                 LOG_WARNING_WITHOUT_CALLER << "Steam multiplayer: lobby discovery call failed";
-                dispatchOperationCompleted(MultiplayerOperation::FindLobby, false);
+                dispatchOperationCompleted(MultiplayerOperation::FindLobby, MultiplayerOperationFailureReason::ServiceFailure);
                 return;
             }
 
@@ -1831,7 +1838,9 @@ public:
             }
 
             // No candidate could be joined. The game decides whether to retry.
-            dispatchOperationCompleted(MultiplayerOperation::FindLobby, false);
+            dispatchOperationCompleted(MultiplayerOperation::FindLobby,
+                                       count ? MultiplayerOperationFailureReason::LobbyEntryFailed
+                                             : MultiplayerOperationFailureReason::NoCompatibleLobbies);
             return;
         }
 
@@ -1851,7 +1860,9 @@ public:
             {
                 LOG_WARNING_WITHOUT_CALLER << "Steam multiplayer: lobby creation failed, result " << status;
                 pendingRole_ = Role::None;
-                dispatchOperationCompleted(MultiplayerOperation::CreateLobby, false);
+                dispatchOperationCompleted(MultiplayerOperation::CreateLobby,
+                                           !success || ioFailed ? MultiplayerOperationFailureReason::ServiceFailure
+                                                                : MultiplayerOperationFailureReason::LobbyCreationFailed);
                 return;
             }
 
@@ -1871,7 +1882,7 @@ public:
                 LOG_WARNING_WITHOUT_CALLER << "Steam multiplayer: JoinLobby callback failed";
                 pendingRole_ = Role::None;
                 requestedLobbyID_ = 0;
-                dispatchOperationCompleted(pendingGuestOperation_, false);
+                dispatchOperationCompleted(pendingGuestOperation_, MultiplayerOperationFailureReason::ServiceFailure);
             }
         }
     }

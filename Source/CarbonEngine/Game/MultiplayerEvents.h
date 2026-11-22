@@ -94,6 +94,19 @@ enum class MultiplayerOperation
     JoinLobby
 };
 
+/** Provider-neutral outcome details for an asynchronous lobby operation. */
+enum class MultiplayerOperationFailureReason
+{
+    None,                       ///< Operation succeeded.
+    Unknown,                    ///< No more specific reason is available.
+    NoCompatibleLobbies,        ///< Discovery returned no compatible candidates.
+    ServiceFailure,             ///< The provider could not deliver a valid call result.
+    IncompatibleNetworkVersion, ///< The joined lobby advertised a different network version or none.
+    LobbyEntryFailed,           ///< A candidate could not be joined or entry was rejected.
+    LobbyCreationFailed,        ///< The provider rejected lobby creation.
+    LobbyConfigurationFailed    ///< Required lobby configuration could not be published.
+};
+
 /** Sent when an accepted asynchronous lobby request completes or fails.
     A request rejected synchronously returns false and does not generate this event. */
 class CARBON_API MultiplayerOperationCompletedEvent : public Event
@@ -101,16 +114,23 @@ class CARBON_API MultiplayerOperationCompletedEvent : public Event
 public:
     /** Constructs an event containing the result of an asynchronous lobby operation. */
     MultiplayerOperationCompletedEvent(MultiplayerOperation operation, bool succeeded)
-        : operation_(operation), succeeded_(succeeded) {}
+        : MultiplayerOperationCompletedEvent(operation, succeeded ? MultiplayerOperationFailureReason::None
+                                                                  : MultiplayerOperationFailureReason::Unknown) {}
+
+    /** Constructs an event with a provider-neutral outcome; None indicates success. */
+    MultiplayerOperationCompletedEvent(MultiplayerOperation operation, MultiplayerOperationFailureReason reason)
+        : operation_(operation), failureReason_(reason) {}
 
     /** Returns the asynchronous lobby operation that completed. */
     MultiplayerOperation getOperation() const { return operation_; }
     /** Returns whether the operation completed successfully. */
-    bool succeeded() const { return succeeded_; }
+    bool succeeded() const { return failureReason_ == MultiplayerOperationFailureReason::None; }
+    /** Returns None on success, or the reason the operation failed. */
+    MultiplayerOperationFailureReason getFailureReason() const { return failureReason_; }
 
 private:
     MultiplayerOperation operation_;
-    bool succeeded_;
+    MultiplayerOperationFailureReason failureReason_;
 };
 
 /** Sent after a remote NetFrame has been authenticated and decoded.

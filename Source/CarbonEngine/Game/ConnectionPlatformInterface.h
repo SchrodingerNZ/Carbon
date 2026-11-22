@@ -106,6 +106,9 @@ protected:
     /** Notify applications when an accepted asynchronous lobby operation finishes. */
     void dispatchOperationCompleted(MultiplayerOperation operation, bool succeeded);
 
+    /** Notify applications of a completed lobby operation with a provider-neutral outcome. */
+    void dispatchOperationCompleted(MultiplayerOperation operation, MultiplayerOperationFailureReason reason);
+
     /** Providers call this only after authenticating the sender and decoding the frame. */
     void dispatchNetFrame(PlayerID sender, const NetFrame& frame);
 
