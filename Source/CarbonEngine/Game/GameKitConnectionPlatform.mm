@@ -16,21 +16,16 @@
     #include <AppKit/AppKit.h>
 #endif
 #include <dispatch/dispatch.h>
+#include <chrono>
+#include <cmath>
+#include <map>
+#include <string>
 #include "CarbonEngine/Core/Memory/MemoryInterceptor.h"
 
 namespace Carbon
 {
 namespace
 {
-
-// The skeleton does not accept achievement requests until reporting is implemented.
-class GameKitAchievements : public AchievementInterface
-{
-public:
-    bool isReady() const override { return false; }
-    bool setProgress(const String&, unsigned int, unsigned int) override { return false; }
-    unsigned int getProgress(const String&, unsigned int) const override { return 0; }
-};
 
 #ifdef iOS
 using AuthenticationViewController = UIViewController;
@@ -185,6 +180,118 @@ private:
 #endif
 };
 
+// A separate mailbox per load attempt prevents late results from a timed-out
+// request or a previous account from replacing the current account's state.
+struct GameKitAchievementLoad
+{
+    bool completed = false;
+    bool succeeded = false;
+    std::map<std::string, double> percentages;
+};
+
+class GameKitAchievements : public AchievementInterface
+{
+public:
+    explicit GameKitAchievements(const GameKitAuthentication& authentication) : authentication_(authentication) {}
+
+    bool isReady() const override { return ready_ && authentication_.isAuthenticated() && generation_ == authentication_.getGeneration(); }
+
+    // Reporting is deliberately not accepted until the reporting implementation is installed.
+    bool setProgress(const String&, unsigned int, unsigned int) override { return false; }
+
+    unsigned int getProgress(const String& id, unsigned int maxProgress) const override
+    {
+        if (!isReady())
+            return 0;
+        const auto it = percentages_.find(id.cStr());
+        if (it == percentages_.end())
+            return 0;
+        const auto percent = it->second;
+        if (!maxProgress)
+            return percent >= 100.0 ? 1 : 0;
+        if (percent >= 100.0)
+            return maxProgress;
+        // Recover the nearest integral progress without treating partial completion as an award.
+        const auto progress = static_cast<unsigned int>(std::floor(percent * double(maxProgress) / 100.0 + 0.5));
+        return std::min(progress, maxProgress - 1);
+    }
+
+    void update()
+    {
+        if (![NSThread isMainThread])
+            return;
+        const auto now = Clock::now();
+        if (generation_ != authentication_.getGeneration())
+        {
+            generation_ = authentication_.getGeneration();
+            ready_ = false;
+            percentages_.clear();
+            load_.reset();
+            nextLoad_ = now;
+        }
+        if (!authentication_.isAuthenticated() || ready_)
+            return;
+
+        if (load_ && load_->completed)
+        {
+            if (load_->succeeded)
+            {
+                percentages_.swap(load_->percentages);
+                ready_ = true;
+                LOG_INFO << "GameKit achievements loaded";
+            }
+            else
+                LOG_WARNING << "GameKit achievement loading failed; will retry";
+            load_.reset();
+            nextLoad_ = now + std::chrono::seconds(5);
+        }
+        else if (load_ && now - loadStarted_ >= std::chrono::seconds(30))
+        {
+            LOG_WARNING << "GameKit achievement loading timed out; will retry";
+            load_.reset();
+            nextLoad_ = now + std::chrono::seconds(5);
+        }
+
+        if (ready_ || load_ || now < nextLoad_)
+            return;
+
+        load_ = std::make_shared<GameKitAchievementLoad>();
+        loadStarted_ = now;
+        const std::weak_ptr<GameKitAchievementLoad> weakLoad(load_);
+        [GKAchievement loadAchievementsWithCompletionHandler:^(NSArray<GKAchievement*>* achievements, NSError* error) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                auto load = weakLoad.lock();
+                if (!load)
+                    return;
+                load->succeeded = !error && achievements != nil;
+                if (load->succeeded)
+                {
+                    for (GKAchievement* achievement in achievements)
+                    {
+                        const auto identifier = achievement.identifier.UTF8String;
+                        const auto percent = achievement.percentComplete;
+                        if (!identifier || !*identifier || !std::isfinite(percent))
+                            continue;
+                        auto& value = load->percentages[identifier];
+                        value = std::max(value, achievement.completed ? 100.0 : std::min(100.0, std::max(0.0, percent)));
+                    }
+                }
+                load->completed = true;
+            });
+        }];
+    }
+
+private:
+    using Clock = std::chrono::steady_clock;
+    const GameKitAuthentication& authentication_;
+    uint64_t generation_ = 0;
+    bool ready_ = false;
+    std::map<std::string, double> percentages_;
+    std::shared_ptr<GameKitAchievementLoad> load_;
+    Clock::time_point nextLoad_ = Clock::now();
+    Clock::time_point loadStarted_ = Clock::now();
+};
+
 class GameKitMultiplayer : public MultiplayerInterface
 {
 public:
@@ -198,9 +305,13 @@ private:
 class GameKitConnectionPlatform : public ConnectionPlatformInterface
 {
 public:
-    GameKitConnectionPlatform() : multiplayer_(authentication_) {}
+    GameKitConnectionPlatform() : achievements_(authentication_), multiplayer_(authentication_) {}
 
-    void update() override { authentication_.update(); }
+    void update() override
+    {
+        authentication_.update();
+        achievements_.update();
+    }
 
     AchievementInterface& getAchievements() override { return achievements_; }
     MultiplayerInterface& getMultiplayer() override { return multiplayer_; }
