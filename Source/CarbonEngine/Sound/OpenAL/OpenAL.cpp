@@ -206,7 +206,12 @@ void OpenAL::clear()
 
     // Sources must be deleted before their attached buffers, while the context is still valid.
     if (alcContext_)
+    {
         clearALDeleteQueues();
+        if (!alBufferDeleteQueue_.empty())
+            LOG_WARNING << "OpenAL buffers still attached at shutdown: " << alBufferDeleteQueue_.size();
+    }
+    alBufferDeleteQueue_.clear();
 
     // Close OpenAL
     if (alcContext_)
@@ -283,7 +288,8 @@ bool OpenAL::processEvent(const Event& e)
                     // it is no longer waiting in the LoadPending state, so throw out the work done by the sound load
                     // thread.
 
-                    alDeleteBuffers(1, &alID);
+                    if (alID)
+                        alBufferDeleteQueue_.append(alID);
                 }
             }
 
@@ -307,16 +313,24 @@ bool OpenAL::processEvent(const Event& e)
             if (source->isWaitingForBufferLoad)
             {
                 auto buffer = reinterpret_cast<Buffer*>(source->soundShader->getBufferObject());
-                if (buffer->state != Buffer::LoadPending)
-                {
-                    if (buffer->state == Buffer::Ready)
-                    {
-                        if (setSourceSoundShader(source, source->soundShader->getName()))
-                            setSourceState(source, source->state);
-                    }
+                if (buffer && buffer->state == Buffer::LoadPending)
+                    continue; // Preserve requested playback state while no native buffer is attached.
 
+                if (!buffer || buffer->state != Buffer::Ready ||
+                    !setSourceSoundShader(source, source->soundShader->getName()))
+                {
                     source->isWaitingForBufferLoad = false;
+                    LOG_WARNING << "Failed completing background sound buffer load";
+                    source->state = Stopped;
+                    source->valid = false;
                 }
+            }
+
+            if (!source->valid)
+            {
+                if (source->temporary)
+                    sourcesToDelete.append(source);
+                continue;
             }
 
             auto pitch = Math::clamp(source->pitch * source->soundShader->getPitch(), 0.5f, 2.0f);
@@ -388,13 +402,22 @@ void OpenAL::clearALDeleteQueues()
     }
     alSourceDeleteQueue_.clear();
 
-    for (auto buffer : alBufferDeleteQueue_)
+    // Keep buffers that are still attached for a later attempt rather than losing their IDs.
+    for (auto i = 0U; i < alBufferDeleteQueue_.size();)
     {
+        auto buffer = alBufferDeleteQueue_[i];
         alGetError();
         alDeleteBuffers(1, &buffer);
-        CHECK_OPENAL_ERROR("Failed deleting buffer " << buffer);
+        auto error = alGetError();
+        if (error == AL_INVALID_OPERATION)
+        {
+            ++i;
+            continue;
+        }
+        if (error != AL_NO_ERROR)
+            LOG_ERROR << "Failed deleting buffer " << buffer << " (" << alGetString(error) << ")";
+        alBufferDeleteQueue_.erase(i);
     }
-    alBufferDeleteQueue_.clear();
 }
 
 SoundInterface::SourceObject OpenAL::createSource()
@@ -530,12 +553,27 @@ bool OpenAL::setSourceSoundShader(SourceObject sourceObject, const String& shade
 
     if (source->soundShader && source->soundShader->getName() == shader)
     {
-        if (!source->isWaitingForBufferLoad)
+        if (source->valid && !source->isWaitingForBufferLoad)
             return true;
     }
     else
     {
-        // Release reference to current sound shader
+        // Stop and detach the old native buffer before releasing its shader reference.
+        // Retain the old shader if detaching fails, since its buffer may still be in use.
+        if (source->soundShader)
+        {
+            alGetError();
+            alSourceStop(source->alID);
+            alSourcei(source->alID, AL_BUFFER, 0);
+            auto error = alGetError();
+            if (error != AL_NO_ERROR)
+            {
+                LOG_ERROR << "Failed detaching previous sound buffer (" << alGetString(error) << ")";
+                return false;
+            }
+        }
+        source->valid = false;
+        source->isWaitingForBufferLoad = false;
         soundShaders().releaseSoundShader(source->soundShader);
 
         // Take reference to new sound shader
@@ -545,7 +583,11 @@ bool OpenAL::setSourceSoundShader(SourceObject sourceObject, const String& shade
     // Check the sound shader has a valid audio buffer
     auto buffer = reinterpret_cast<Buffer*>(source->soundShader->getBufferObject());
     if (!buffer)
+    {
+        source->isWaitingForBufferLoad = false;
+        source->state = Stopped;
         return false;
+    }
 
     // Handle the case when the load of this buffer has not yet occurred
     if (buffer->state == Buffer::LoadPending)
@@ -565,7 +607,11 @@ bool OpenAL::setSourceSoundShader(SourceObject sourceObject, const String& shade
 
     // The buffer failed to load
     if (buffer->state == Buffer::Error)
+    {
+        source->isWaitingForBufferLoad = false;
+        source->state = Stopped;
         return false;
+    }
 
     // Store current state
     auto previousState = source->state;
@@ -574,12 +620,21 @@ bool OpenAL::setSourceSoundShader(SourceObject sourceObject, const String& shade
     // Set all the AL values for this source using the contents of the sound shader
     alGetError();
     alSourcei(source->alID, AL_BUFFER, buffer->alID);
-    CHECK_OPENAL_ERROR("Failed binding buffer to source");
+    auto error = alGetError();
+    if (error != AL_NO_ERROR)
+    {
+        LOG_ERROR << "Failed binding buffer to source (" << alGetString(error) << ")";
+        source->valid = false;
+        source->isWaitingForBufferLoad = false;
+        source->state = Stopped;
+        return false;
+    }
 
     alSourcef(source->alID, AL_GAIN, 0.0f);
     updateSourcePropertiesFromSoundShader(source);
 
     source->valid = true;
+    source->isWaitingForBufferLoad = false;
 
     // Set it to playing if it was already playing prior to updating everything
     if (previousState == Playing)
