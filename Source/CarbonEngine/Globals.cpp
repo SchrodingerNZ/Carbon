@@ -36,6 +36,11 @@
 namespace Carbon
 {
 
+#ifdef APPLE
+// Private registration entry point also anchors the provider in static Apple SDK builds.
+void registerGameKitConnectionPlatform();
+#endif
+
 Vector<Globals::PrioritizedFunction>* Globals::runAtStartup_;
 Vector<Globals::PrioritizedFunction>* Globals::runAtShutdown_;
 
@@ -158,6 +163,9 @@ bool Globals::initializeEngine(const String& clientName)
     LOG_INFO << "Physics interfaces: " << InterfaceRegistry<PhysicsInterface>::getImplementationNames();
     LOG_INFO << "Platform interfaces: " << InterfaceRegistry<PlatformInterface>::getImplementationNames();
     LOG_INFO << "Sound interfaces: " << InterfaceRegistry<SoundInterface>::getImplementationNames();
+#ifdef APPLE
+    registerGameKitConnectionPlatform();
+#endif
     LOG_INFO << "Connection interfaces: " << InterfaceRegistry<ConnectionPlatformInterface>::getImplementationNames();
 
     // Core
