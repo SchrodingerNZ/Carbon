@@ -1727,7 +1727,12 @@ public:
         // Close all peer sockets before leaving the lobby.
         closeSockets();
 
-        // Invalidate pending operations; late entry callbacks are rejected below.
+        // Steam cannot cancel an outstanding create/join call. Retain its handle
+        // solely to release any lobby acquired after cancellation.
+        if (pendingLobbyCall_)
+            cancelledLobbyCalls_[pendingLobbyCall_] = std::make_pair(pendingRole_, requestedLobbyID_);
+
+        // Invalidate pending operations before dispatching application events.
         pendingRole_ = Role::None;
         pendingLobbyCall_ = 0;
         searching_ = false;
@@ -1774,41 +1779,9 @@ public:
     /** Suppress application notifications while the connection provider is destroyed. */
     void shutdownSession() { endSession(MultiplayerSessionEndReason::Left, false); }
 
-    void onLobbyEntered(const unsigned char* data, int size)
+    // Only correlated Steam call results can establish a session.
+    void completeLobbyEntry(uint64_t enteredID)
     {
-        // LobbyEnter_t: uint64 lobby ID, uint32 permissions, bool locked, uint32 response.
-        if (!available_ || size < 20)
-            return;
-
-        uint64_t enteredID = 0;
-        uint32_t response = 0;
-        memcpy(&enteredID, data, sizeof(enteredID));
-        memcpy(&response, data + 16, sizeof(response));
-
-        // Ignore stale callbacks, leaving unexpected lobbies so they don't leak.
-        if (enteredID && enteredID == lobbyID_)
-            return;
-
-        if (pendingRole_ == Role::None || !enteredID ||
-            (pendingRole_ == Role::Guest && enteredID != requestedLobbyID_))
-        {
-            if (enteredID)
-                leaveLobby_(matchmaking_, enteredID);
-            return;
-        }
-
-        if (response != 1) // k_EChatRoomEnterResponseSuccess
-        {
-            LOG_WARNING_WITHOUT_CALLER << "Steam multiplayer: lobby entry failed, response " << response;
-            pendingLobbyCall_ = 0;
-            const auto operation = pendingRole_ == Role::Host ? MultiplayerOperation::CreateLobby
-                                                              : pendingGuestOperation_;
-            pendingRole_ = Role::None;
-            requestedLobbyID_ = 0;
-            dispatchOperationCompleted(operation, MultiplayerOperationFailureReason::LobbyEntryFailed);
-            return;
-        }
-
         if (pendingRole_ == Role::Host)
         {
             if (!setLobbyData_(matchmaking_, enteredID, "network_version", networkVersion_.cStr()))
@@ -1925,47 +1898,84 @@ public:
             return;
         }
 
-        if (pendingLobbyCall_ != call)
+        // Ordinary LobbyEnter callbacks have no request identity. Only the
+        // call result can complete an operation, even when retrying the same lobby.
+        const auto cancelled = cancelledLobbyCalls_.find(call);
+        const bool wasCancelled = cancelled != cancelledLobbyCalls_.end();
+        if (!wasCancelled && (!pendingLobbyCall_ || pendingLobbyCall_ != call))
             return;
 
-        if (callbackID == 513 && pendingRole_ == Role::Host)
-        {
-            // LobbyCreated_t: int EResult, 4 bytes padding, uint64 lobby ID.
-            unsigned char result[16] = {};
-            bool ioFailed = false;
-            const auto success = getCallResult_(pipe, call, result, sizeof(result), 513, &ioFailed);
-            int status = 0;
-            memcpy(&status, result, sizeof(status));
-            pendingLobbyCall_ = 0;
-            if (!success || ioFailed || status != 1)
-            {
-                LOG_WARNING_WITHOUT_CALLER << "Steam multiplayer: lobby creation failed, result " << status;
-                pendingRole_ = Role::None;
-                dispatchOperationCompleted(MultiplayerOperation::CreateLobby,
-                                           !success || ioFailed ? MultiplayerOperationFailureReason::ServiceFailure
-                                                                : MultiplayerOperationFailureReason::LobbyCreationFailed);
-                return;
-            }
+        const auto role = wasCancelled ? cancelled->second.first : pendingRole_;
+        const int expectedCallback = role == Role::Host ? 513 : 504;
+        if (role == Role::None || callbackID != expectedCallback)
+            return;
 
-            LOG_INFO << "Steam multiplayer: lobby created; awaiting lobby entry callback";
+        // Steam callback packing differs between platforms. The completion
+        // record supplies the actual payload size; use it when reading the result.
+        unsigned char result[24] = {};
+        const bool validSize = role == Role::Host ? (payloadSize == 12 || payloadSize == 16)
+                                                 : (payloadSize == 20 || payloadSize == 24);
+        bool ioFailed = false;
+        const bool success = validSize && getCallResult_(pipe, call, result, payloadSize, callbackID, &ioFailed);
+        uint64_t enteredID = 0;
+        uint32_t status = 0;
+        if (success && !ioFailed)
+        {
+            if (role == Role::Host)
+            {
+                memcpy(&status, result, sizeof(status));
+                memcpy(&enteredID, result + (payloadSize == 12 ? 4 : 8), sizeof(enteredID));
+            }
+            else
+            {
+                memcpy(&enteredID, result, sizeof(enteredID));
+                memcpy(&status, result + 16, sizeof(status));
+            }
+        }
+
+        const bool entered = success && !ioFailed && status == 1 && enteredID;
+        if (wasCancelled)
+        {
+            const auto cancelledTarget = cancelled->second.second;
+            cancelledLobbyCalls_.erase(cancelled);
+            // A retry may target the same lobby. Never leave the active lobby
+            // or interfere with that retry; its own result will settle membership.
+            // A failed cancelled retry can still inherit membership from an
+            // earlier successful cancelled join, so also release its target.
+            const auto releaseCancelledLobby = [this](uint64_t id)
+            {
+                if (id && id != lobbyID_ && !(pendingRole_ == Role::Guest && requestedLobbyID_ == id))
+                    leaveLobby_(matchmaking_, id);
+            };
+            releaseCancelledLobby(cancelledTarget);
+            if (entered && enteredID != cancelledTarget)
+                releaseCancelledLobby(enteredID);
             return;
         }
 
-        if (callbackID == 504 && pendingRole_ == Role::Guest)
+        pendingLobbyCall_ = 0;
+        const auto operation = role == Role::Host ? MultiplayerOperation::CreateLobby : pendingGuestOperation_;
+        if (!entered || (role == Role::Guest && enteredID != requestedLobbyID_))
         {
-            // Consume the JoinLobby call result to detect IO failure; LobbyEnter_t drives entry.
-            unsigned char result[24] = {};
-            bool ioFailed = false;
-            const auto success = getCallResult_(pipe, call, result, sizeof(result), 504, &ioFailed);
-            pendingLobbyCall_ = 0;
-            if (!success || ioFailed)
-            {
-                LOG_WARNING_WITHOUT_CALLER << "Steam multiplayer: JoinLobby callback failed";
-                pendingRole_ = Role::None;
-                requestedLobbyID_ = 0;
-                dispatchOperationCompleted(pendingGuestOperation_, MultiplayerOperationFailureReason::ServiceFailure);
-            }
+            // A cancelled earlier join may have acquired this same lobby while
+            // the current retry was pending. Release it if the retry fails.
+            if (role == Role::Guest && requestedLobbyID_)
+                leaveLobby_(matchmaking_, requestedLobbyID_);
+            if (entered && enteredID != requestedLobbyID_)
+                leaveLobby_(matchmaking_, enteredID);
+            pendingRole_ = Role::None;
+            requestedLobbyID_ = 0;
+            LOG_WARNING_WITHOUT_CALLER << "Steam multiplayer: lobby operation failed, result " << status;
+            dispatchOperationCompleted(operation,
+                                       !success || ioFailed ? MultiplayerOperationFailureReason::ServiceFailure
+                                       : role == Role::Host ? MultiplayerOperationFailureReason::LobbyCreationFailed
+                                                            : MultiplayerOperationFailureReason::LobbyEntryFailed);
+            return;
         }
+
+        // LobbyCreated success guarantees membership, just like JoinLobby's
+        // successful LobbyEnter call result. The ordinary callback is redundant.
+        completeLobbyEntry(enteredID);
     }
 
 private:
@@ -2271,6 +2281,7 @@ private:
     uint64_t requestedLobbyID_ = 0;
     uint64_t pendingSearchCall_ = 0;
     uint64_t pendingLobbyCall_ = 0;
+    std::map<uint64_t, std::pair<Role, uint64_t>> cancelledLobbyCalls_;
     Role pendingRole_ = Role::None;
     MultiplayerOperation pendingGuestOperation_ = MultiplayerOperation::JoinLobby;
     bool available_ = false;
@@ -2458,9 +2469,8 @@ public:
             if (callback.callback == 507 && callback.data)
                 multiplayer_.onLobbyChat(callback.data, callback.size);
 
-            // LobbyEnter_t (504) is delivered as an ordinary callback as well as a call result.
-            if (callback.callback == 504 && callback.data)
-                multiplayer_.onLobbyEntered(callback.data, callback.size);
+            // Ordinary LobbyEnter_t callbacks are deliberately ignored: only
+            // correlated SteamAPICallCompleted_t results complete Carbon requests.
 
             freeCallback_(steamPipe_);
         }
