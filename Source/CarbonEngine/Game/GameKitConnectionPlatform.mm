@@ -189,6 +189,13 @@ struct GameKitAchievementLoad
     std::map<std::string, double> percentages;
 };
 
+struct GameKitAchievementReport
+{
+    bool completed = false;
+    bool succeeded = false;
+    std::map<std::string, double> percentages;
+};
+
 class GameKitAchievements : public AchievementInterface
 {
 public:
@@ -196,17 +203,34 @@ public:
 
     bool isReady() const override { return ready_ && authentication_.isAuthenticated() && generation_ == authentication_.getGeneration(); }
 
-    // Reporting is deliberately not accepted until the reporting implementation is installed.
-    bool setProgress(const String&, unsigned int, unsigned int) override { return false; }
+    bool setProgress(const String& id, unsigned int progress, unsigned int maxProgress) override
+    {
+        if (![NSThread isMainThread] || !*id.cStr())
+            return false;
+        synchronizeAccount(Clock::now());
+        // Before the first authentication, accept startup requests for the initial account.
+        // After sign-out, do not attribute new requests to an unknown subsequent account.
+        if (!authentication_.isAuthenticated() && generation_ != 0)
+            return false;
+        const std::string key(id.cStr());
+        if (![NSString stringWithUTF8String:key.c_str()])
+            return false;
+        const auto percent = maxProgress ? 100.0 * double(std::min(progress, maxProgress)) / double(maxProgress)
+                                         : (progress ? 100.0 : 0.0);
+        const auto known = percentages_.find(key);
+        if (percent > 0.0 && (known == percentages_.end() || percent > known->second))
+            requested_[key] = std::max(requested_[key], percent);
+        return true;
+    }
 
     unsigned int getProgress(const String& id, unsigned int maxProgress) const override
     {
-        if (!isReady())
+        if (generation_ != authentication_.getGeneration())
             return 0;
         const auto it = percentages_.find(id.cStr());
-        if (it == percentages_.end())
-            return 0;
-        const auto percent = it->second;
+        const auto pending = requested_.find(id.cStr());
+        const auto percent = std::max(it == percentages_.end() ? 0.0 : it->second,
+                                      pending == requested_.end() ? 0.0 : pending->second);
         if (!maxProgress)
             return percent >= 100.0 ? 1 : 0;
         if (percent >= 100.0)
@@ -221,16 +245,14 @@ public:
         if (![NSThread isMainThread])
             return;
         const auto now = Clock::now();
-        if (generation_ != authentication_.getGeneration())
-        {
-            generation_ = authentication_.getGeneration();
-            ready_ = false;
-            percentages_.clear();
-            load_.reset();
-            nextLoad_ = now;
-        }
-        if (!authentication_.isAuthenticated() || ready_)
+        synchronizeAccount(now);
+        if (!authentication_.isAuthenticated())
             return;
+        if (ready_)
+        {
+            updateReporting(now);
+            return;
+        }
 
         if (load_ && load_->completed)
         {
@@ -252,7 +274,12 @@ public:
             nextLoad_ = now + std::chrono::seconds(5);
         }
 
-        if (ready_ || load_ || now < nextLoad_)
+        if (ready_)
+        {
+            updateReporting(now);
+            return;
+        }
+        if (load_ || now < nextLoad_)
             return;
 
         load_ = std::make_shared<GameKitAchievementLoad>();
@@ -283,10 +310,99 @@ public:
 
 private:
     using Clock = std::chrono::steady_clock;
+    void synchronizeAccount(Clock::time_point now)
+    {
+        if (generation_ == authentication_.getGeneration())
+            return;
+        // Only initial startup requests may be transferred to the first authenticated account.
+        if (generation_ != 0 || !authentication_.isAuthenticated())
+        {
+            if (!requested_.empty())
+                LOG_WARNING << "GameKit discarded pending achievements on account change";
+            requested_.clear();
+        }
+        generation_ = authentication_.getGeneration();
+        ready_ = false;
+        percentages_.clear();
+        load_.reset();
+        report_.reset();
+        nextLoad_ = nextReport_ = now;
+    }
+
+    void updateReporting(Clock::time_point now)
+    {
+        if (report_ && report_->completed)
+        {
+            if (report_->succeeded)
+            {
+                for (const auto& entry : report_->percentages)
+                    percentages_[entry.first] = std::max(percentages_[entry.first], entry.second);
+            }
+            else
+                LOG_WARNING << "GameKit achievement reporting failed; will retry";
+            report_.reset();
+            nextReport_ = now + std::chrono::seconds(5);
+        }
+        else if (report_ && now - reportStarted_ >= std::chrono::seconds(60))
+        {
+            // Each attempt has its own mailbox. A late callback cannot acknowledge a newer attempt.
+            // Game Center only increases reported progress, so retrying the same absolute value is safe.
+            LOG_WARNING << "GameKit achievement reporting timed out; will retry";
+            report_.reset();
+            nextReport_ = now + std::chrono::seconds(5);
+        }
+
+        for (auto it = requested_.begin(); it != requested_.end();)
+        {
+            const auto known = percentages_.find(it->first);
+            if (known != percentages_.end() && known->second >= it->second)
+                it = requested_.erase(it);
+            else
+                ++it;
+        }
+        if (report_ || requested_.empty() || now < nextReport_)
+            return;
+
+        auto nativeAchievements = [NSMutableArray array];
+        auto attempt = std::make_shared<GameKitAchievementReport>();
+        for (const auto& entry : requested_)
+        {
+            auto identifier = [NSString stringWithUTF8String:entry.first.c_str()];
+            auto achievement = [[GKAchievement alloc] initWithIdentifier:identifier];
+            if (!achievement)
+                continue;
+            achievement.percentComplete = entry.second;
+            [nativeAchievements addObject:achievement];
+            attempt->percentages.emplace(entry.first, entry.second);
+        }
+        if (!nativeAchievements.count)
+        {
+            nextReport_ = now + std::chrono::seconds(5);
+            LOG_WARNING << "GameKit could not construct pending achievements; will retry";
+            return;
+        }
+        report_ = attempt;
+        reportStarted_ = now;
+        const std::weak_ptr<GameKitAchievementReport> weakReport(report_);
+        [GKAchievement reportAchievements:nativeAchievements withCompletionHandler:^(NSError* error) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                auto report = weakReport.lock();
+                if (!report)
+                    return;
+                report->succeeded = error == nil;
+                report->completed = true;
+            });
+        }];
+    }
+
     const GameKitAuthentication& authentication_;
     uint64_t generation_ = 0;
     bool ready_ = false;
     std::map<std::string, double> percentages_;
+    std::map<std::string, double> requested_;
+    std::shared_ptr<GameKitAchievementReport> report_;
+    Clock::time_point nextReport_ = Clock::now();
+    Clock::time_point reportStarted_ = Clock::now();
     std::shared_ptr<GameKitAchievementLoad> load_;
     Clock::time_point nextLoad_ = Clock::now();
     Clock::time_point loadStarted_ = Clock::now();
