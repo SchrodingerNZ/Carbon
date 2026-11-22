@@ -229,7 +229,7 @@ public:
         // Absolute progress never decreases, even before Steam stats are ready.
         auto& entry = entries_[id.cStr()];
         entry.maxProgress = maxProgress;
-        entry.local = std::max(entry.local, progress);
+        entry.requested = std::max(entry.requested, progress);
 
         if (ready_)
             reconcile(id.cStr(), entry);
@@ -246,7 +246,7 @@ public:
         if (ready_)
             const_cast<SteamAchievements*>(this)->reconcile(id.cStr(), entry);
 
-        return entry.local;
+        return std::max(entry.requested, entry.remote);
     }
 
     void onStatsReceived(int result)
@@ -272,10 +272,19 @@ public:
         {
             // Changes made while the request was in flight still need storing.
             dirty_ = mutationVersion_ != submittedVersion_;
+            storeFailed_ = false;
         }
         else
         {
             dirty_ = true;
+            storeFailed_ = true;
+            // Steam may have corrected its local cache following a rejected store.
+            // Only replay progress actually requested by the game, not values previously read.
+            for (auto& item : entries_)
+            {
+                item.second.loaded = false;
+                item.second.retryAfter = std::chrono::steady_clock::now();
+            }
             LOG_WARNING_WITHOUT_CALLER << "Steam achievement stats store failed, result " << result;
         }
     }
@@ -302,8 +311,15 @@ public:
             }
         }
 
-        // Batch ordinary progress writes; Steam recommends StoreStats on major changes, not per-frame.
-        if (dirty_ && std::chrono::steady_clock::now() - lastStore_ >= std::chrono::minutes(1))
+        if (!ready_)
+            return;
+
+        // Retain and retry unresolved requests, even if the game never submits them again.
+        for (auto& item : entries_)
+            reconcile(item.first, item.second);
+
+        // Batch ordinary progress writes; unlock notifications may be requested sooner.
+        if (urgentStore_ || std::chrono::steady_clock::now() - lastStore_ >= std::chrono::minutes(1))
             flush(true);
     }
 
@@ -312,12 +328,24 @@ public:
         if (!ready_ || !dirty_ || storePending_ || !force)
             return;
 
+        const auto now = std::chrono::steady_clock::now();
+        // Record attempts, not just successes, to prevent per-frame StoreStats failures.
+        const auto interval = storeFailed_ ? std::chrono::seconds(60) : std::chrono::seconds(5);
+        if (now - lastStore_ < interval)
+            return;
+
+        lastStore_ = now;
         if (store_(userStats_))
         {
             // Remember which changes this asynchronous request covers.
             submittedVersion_ = mutationVersion_;
             storePending_ = true;
-            lastStore_ = std::chrono::steady_clock::now();
+            urgentStore_ = false;
+        }
+        else
+        {
+            storeFailed_ = true;
+            LOG_WARNING_WITHOUT_CALLER << "Steam achievement StoreStats submission failed; will retry";
         }
     }
 
@@ -340,14 +368,29 @@ private:
     struct Entry
     {
         unsigned int maxProgress = 0;
-        unsigned int local = 0;
+        unsigned int requested = 0;
         unsigned int remote = 0;
         bool loaded = false;
+        bool granted = false;
         bool warned = false;
+        std::chrono::steady_clock::time_point retryAfter = std::chrono::steady_clock::time_point::min();
     };
+
+    void deferReconcile(const std::string& id, Entry& entry, const char* operation)
+    {
+        entry.retryAfter = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        if (!entry.warned)
+        {
+            LOG_WARNING_WITHOUT_CALLER << "Steam achievement " << operation << " failed: " << id.c_str() << "; will retry";
+            entry.warned = true;
+        }
+    }
 
     void reconcile(const std::string& id, Entry& entry)
     {
+        if (std::chrono::steady_clock::now() < entry.retryAfter)
+            return;
+
         if (!entry.loaded)
         {
             // Read Steam's unlock flag and, for progress achievements, its paired integer stat.
@@ -359,43 +402,49 @@ private:
 
             if (!achievementOk || !statOk)
             {
-                if (!entry.warned)
-                {
-                    LOG_WARNING_WITHOUT_CALLER << "Steam achievement or stat not configured: " << id.c_str();
-                    entry.warned = true;
-                }
+                deferReconcile(id, entry, "read");
                 return;
             }
 
-            const auto remoteProgress = granted ? (entry.maxProgress ? entry.maxProgress : 1U)
-                                                : (entry.maxProgress ? unsigned(std::max(0, stat)) : 0U);
-            entry.remote = remoteProgress;
-            entry.local = std::max(entry.local, remoteProgress);
+            entry.granted = granted;
+            entry.remote = granted ? (entry.maxProgress ? entry.maxProgress : 1U)
+                                   : (entry.maxProgress ? unsigned(std::max(0, stat)) : 0U);
             entry.loaded = true;
         }
 
-        // Don't overwrite a higher remote value with an earlier local request.
-        if (entry.local <= entry.remote)
-            return;
-
-        if (entry.maxProgress)
+        // Record a successful stat mutation even if the subsequent unlock fails.
+        if (entry.maxProgress && entry.requested > entry.remote)
         {
             const auto statName = id + "_progress";
-            if (entry.local > unsigned(std::numeric_limits<int32_t>::max()) ||
-                !setStat_(userStats_, statName.c_str(), int32_t(entry.local)))
+            if (entry.requested > unsigned(std::numeric_limits<int32_t>::max()) ||
+                !setStat_(userStats_, statName.c_str(), int32_t(entry.requested)))
+            {
+                deferReconcile(id, entry, "SetStat");
                 return;
+            }
+            entry.remote = entry.requested;
+            dirty_ = true;
+            ++mutationVersion_;
         }
 
-        // Full progress unlocks the Steam achievement; partial progress updates only the stat.
-        if ((!entry.maxProgress || entry.local >= entry.maxProgress) && !setAchievement_(userStats_, id.c_str()))
-            return;
-
-        entry.remote = entry.local;
-        dirty_ = true;
-        ++mutationVersion_;
-
-        if (!entry.maxProgress || entry.local >= entry.maxProgress)
+        // A full progress stat alone does not prove the achievement has been unlocked.
+        const auto target = std::max(entry.requested, entry.remote);
+        if (!entry.granted && entry.requested && target >= (entry.maxProgress ? entry.maxProgress : 1U))
+        {
+            if (!setAchievement_(userStats_, id.c_str()))
+            {
+                deferReconcile(id, entry, "SetAchievement");
+                return;
+            }
+            entry.granted = true;
+            entry.remote = target;
+            dirty_ = true;
+            urgentStore_ = true;
+            ++mutationVersion_;
             flush(true);
+        }
+
+        entry.warned = false;
     }
 
     mutable std::unordered_map<std::string, Entry> entries_;
@@ -411,9 +460,11 @@ private:
     bool ready_ = false;
     bool dirty_ = false;
     bool storePending_ = false;
+    bool storeFailed_ = false;
+    bool urgentStore_ = false;
     uint64_t mutationVersion_ = 0;
     uint64_t submittedVersion_ = 0;
-    std::chrono::steady_clock::time_point lastStore_ = std::chrono::steady_clock::now();
+    std::chrono::steady_clock::time_point lastStore_ = std::chrono::steady_clock::now() - std::chrono::minutes(1);
 };
 
 /** Steam lobby discovery, sharing the Steam session and manual callback dispatcher. */
