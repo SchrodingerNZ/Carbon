@@ -20,7 +20,32 @@
 #include <cmath>
 #include <map>
 #include <string>
+#include <vector>
 #include "CarbonEngine/Core/Memory/MemoryInterceptor.h"
+
+// Native callbacks only enqueue data. The Carbon provider consumes it on update.
+@interface CarbonGameKitMatchDelegate : NSObject<GKMatchDelegate>
+@property(nonatomic, copy) void (^receive)(GKMatch*, NSData*, GKPlayer*);
+@property(nonatomic, copy) void (^failure)(GKMatch*);
+@end
+
+@implementation CarbonGameKitMatchDelegate
+- (void)match:(GKMatch*)match didReceiveData:(NSData*)data fromRemotePlayer:(GKPlayer*)player
+{
+    if (self.receive)
+        self.receive(match, data, player);
+}
+- (void)match:(GKMatch*)match player:(GKPlayer*)player didChangeConnectionState:(GKPlayerConnectionState)state
+{
+    if (state == GKPlayerStateDisconnected && self.failure)
+        self.failure(match);
+}
+- (void)match:(GKMatch*)match didFailWithError:(NSError*)error
+{
+    if (self.failure)
+        self.failure(match);
+}
+@end
 
 namespace Carbon
 {
@@ -432,7 +457,7 @@ public:
     {
         if (![NSThread isMainThread] || !authentication_.isAuthenticated() || attempt_ ||
             (operation != MultiplayerOperation::CreateLobby && operation != MultiplayerOperation::FindLobby) ||
-            !*version.cStr() || minMembers < 2 || maxMembers < minMembers ||
+            !*version.cStr() || strlen(version.cStr()) > 256 || minMembers < 2 || maxMembers < minMembers || maxMembers > 32 ||
             maxMembers > [GKMatchRequest maxPlayersAllowedForMatchOfType:GKMatchTypePeerToPeer])
             return false;
 
@@ -510,20 +535,344 @@ private:
     std::shared_ptr<GameKitMatchmakingAttempt> attempt_;
 };
 
+// Use the same identity convention for local and remote players. Never trust an
+// identity claimed inside a packet; GameKit supplies the authenticated sender.
+NSString* gameKitMemberIdentity(GKPlayer* player)
+{
+    if (@available(iOS 12.4, macOS 10.14.6, *))
+        return player.gamePlayerID;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    return player.playerID;
+#pragma clang diagnostic pop
+}
+
+struct GameKitMatchPacket
+{
+    NSData* data = nil;
+    GKPlayer* sender = nil;
+};
+
+struct GameKitMatchMailbox
+{
+    GKMatch* match = nil;
+    std::vector<GameKitMatchPacket> packets;
+    bool failed = false;
+};
+
+// A fixed native roster must agree on the full protocol version, exactly one
+// creator, and the same host identity before it can become a Carbon session.
+// Hello and acknowledgement packets carry the same immutable participant intent.
+class GameKitNegotiation
+{
+public:
+    explicit GameKitNegotiation(const GameKitAuthentication& authentication) : authentication_(authentication) {}
+    ~GameKitNegotiation() { cancel(); }
+
+    bool begin(const std::shared_ptr<GameKitMatchmakingAttempt>& attempt)
+    {
+        if (attempt_ || !attempt || !attempt->match || attempt->failed || !authentication_.isAuthenticated())
+            return false;
+        failureReason_ = MultiplayerOperationFailureReason::None;
+        operation_ = attempt->operation;
+        attempt_ = attempt;
+        generation_ = authentication_.getGeneration();
+        mailbox_ = std::make_shared<GameKitMatchMailbox>();
+        mailbox_->match = attempt_->match;
+        delegate_ = [[CarbonGameKitMatchDelegate alloc] init];
+        const std::weak_ptr<GameKitMatchMailbox> weakMailbox(mailbox_);
+        delegate_.receive = ^(GKMatch* match, NSData* data, GKPlayer* sender) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                auto mailbox = weakMailbox.lock();
+                if (!mailbox || mailbox->match != match || mailbox->failed)
+                    return;
+                // Negotiation packets are small. Bound the mailbox so malformed
+                // or excessive traffic cannot accumulate indefinitely.
+                if (!data || !sender || data.length > 32768 || mailbox->packets.size() >= 256)
+                {
+                    mailbox->failed = true;
+                    return;
+                }
+                GameKitMatchPacket packet;
+                packet.data = data;
+                packet.sender = sender;
+                mailbox->packets.push_back(packet);
+            });
+        };
+        delegate_.failure = ^(GKMatch* match) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                auto mailbox = weakMailbox.lock();
+                if (mailbox && mailbox->match == match)
+                    mailbox->failed = true;
+            });
+        };
+        attempt_->match.delegate = delegate_;
+        started_ = Clock::now();
+        nextSend_ = started_;
+        return true;
+    }
+
+    void cancel()
+    {
+        // Invalidate queued callbacks before disconnecting the native match.
+        mailbox_.reset();
+        if (attempt_)
+        {
+            attempt_->match.delegate = nil;
+            [attempt_->match disconnect];
+        }
+        delegate_ = nil;
+        attempt_.reset();
+        roster_ = nil;
+        localIdentity_ = nil;
+        hostIdentity_ = nil;
+        intents_.clear();
+        acknowledgements_.clear();
+        ready_ = false;
+        sentAcknowledgement_ = false;
+    }
+
+    bool isPending() const { return bool(attempt_) && !ready_; }
+    bool isReady() const { return ready_; }
+    MultiplayerOperation getOperation() const { return operation_; }
+    MultiplayerOperationFailureReason getFailureReason() const { return failureReason_; }
+    NSString* getHostIdentity() const { return hostIdentity_; }
+    NSArray<NSString*>* getRoster() const { return roster_; }
+
+    void update()
+    {
+        if (!attempt_)
+            return;
+        if (!authentication_.isAuthenticated() || generation_ != authentication_.getGeneration() || mailbox_->failed)
+        {
+            reject("account or native match changed");
+            return;
+        }
+        // The next integration stage will consume the agreed match and mailbox.
+        if (ready_)
+            return;
+        const auto now = Clock::now();
+        if (now - started_ >= std::chrono::seconds(30))
+        {
+            reject("negotiation timed out");
+            return;
+        }
+        if (attempt_->match.expectedPlayerCount != 0)
+        {
+            if (roster_)
+                reject("native roster changed");
+            return;
+        }
+        auto roster = readRoster();
+        if (!roster || (roster_ && ![roster_ isEqualToArray:roster]))
+        {
+            reject("invalid or changed roster");
+            return;
+        }
+        if (!roster_)
+        {
+            roster_ = roster;
+            const bool creator = attempt_->operation == MultiplayerOperation::CreateLobby;
+            intents_.emplace(key(localIdentity_), Intent(creator, creator ? attempt_->maxMembers : 0));
+        }
+        std::vector<GameKitMatchPacket> packets;
+        packets.swap(mailbox_->packets);
+        for (const auto& packet : packets)
+            if (!receive(packet))
+            {
+                reject("invalid or incompatible negotiation packet");
+                return;
+            }
+
+        if (intents_.size() == roster_.count && !hostIdentity_)
+        {
+            unsigned int creators = 0;
+            for (const auto& entry : intents_)
+                if (entry.second.creator)
+                {
+                    ++creators;
+                    if (entry.second.capacity < roster_.count)
+                    {
+                        reject("creator capacity is smaller than the native roster");
+                        return;
+                    }
+                    hostIdentity_ = [NSString stringWithUTF8String:entry.first.c_str()];
+                }
+            if (creators != 1)
+            {
+                reject("match requires exactly one creator");
+                return;
+            }
+        }
+        if (hostIdentity_)
+            for (const auto& acknowledgement : acknowledgements_)
+                if (acknowledgement.second != key(hostIdentity_))
+                {
+                    reject("participants disagree on host");
+                    return;
+                }
+
+        // Repeat until every participant has acknowledged the same roster and
+        // host. A peer may have installed its delegate after our first hello.
+        if (now >= nextSend_)
+        {
+            nextSend_ = now + std::chrono::seconds(1);
+            if (sendIntent() && hostIdentity_)
+                sentAcknowledgement_ = true;
+        }
+        if (hostIdentity_ && sentAcknowledgement_ && acknowledgements_.size() + 1 == roster_.count)
+        {
+            ready_ = true;
+            LOG_INFO << "GameKit match negotiation completed";
+        }
+    }
+
+private:
+    using Clock = std::chrono::steady_clock;
+    struct Intent
+    {
+        Intent(bool c, unsigned int n) : creator(c), capacity(n) {}
+        bool creator;
+        unsigned int capacity;
+    };
+
+    static std::string key(NSString* value) { return value.UTF8String ? value.UTF8String : ""; }
+    static bool validString(id value, NSUInteger limit)
+    {
+        if (![value isKindOfClass:[NSString class]])
+            return false;
+        NSString* string = value;
+        const auto bytes = string.UTF8String;
+        const auto length = [string lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
+        return bytes && length > 0 && length <= limit && strlen(bytes) == length;
+    }
+
+    NSArray<NSString*>* readRoster()
+    {
+        localIdentity_ = gameKitMemberIdentity([GKLocalPlayer localPlayer]);
+        if (!validString(localIdentity_, 512))
+            return nil;
+        auto members = [NSMutableArray<NSString*> arrayWithObject:localIdentity_];
+        for (GKPlayer* player in attempt_->match.players)
+        {
+            auto identity = gameKitMemberIdentity(player);
+            if (!validString(identity, 512) || [members containsObject:identity])
+                return nil;
+            [members addObject:identity];
+        }
+        if (members.count < 2 || members.count > attempt_->maxMembers || members.count > 32)
+            return nil;
+        return [members sortedArrayUsingComparator:^NSComparisonResult(NSString* a, NSString* b) {
+            return [a compare:b options:NSLiteralSearch];
+        }];
+    }
+
+    bool sendIntent()
+    {
+        const auto& intent = intents_.at(key(localIdentity_));
+        auto version = [NSString stringWithUTF8String:attempt_->networkVersion.cStr()];
+        if (!validString(version, 256))
+            return false;
+        NSArray* message = @[@"CarbonGK1", version, @(intent.creator ? 1 : 0), @(intent.capacity), roster_,
+                             hostIdentity_ ? hostIdentity_ : @""];
+        auto data = [NSJSONSerialization dataWithJSONObject:message options:0 error:nullptr];
+        if (!data || data.length > 32768)
+            return false;
+        NSError* error = nil;
+        return [attempt_->match sendDataToAllPlayers:data withDataMode:GKMatchSendDataReliable error:&error];
+    }
+
+    bool receive(const GameKitMatchPacket& packet)
+    {
+        auto sender = gameKitMemberIdentity(packet.sender);
+        if (!validString(sender, 512) || [sender isEqualToString:localIdentity_])
+            return false;
+        // A peer may reach its complete roster before us. Only process packets
+        // once the local native roster is complete, and compare the entire roster.
+        if (![roster_ containsObject:sender])
+            return false;
+        id decoded = [NSJSONSerialization JSONObjectWithData:packet.data options:0 error:nullptr];
+        if (![decoded isKindOfClass:[NSArray class]] || [(NSArray*)decoded count] != 6)
+            return false;
+        NSArray* fields = decoded;
+        if (![@"CarbonGK1" isEqual:fields[0]] || !validString(fields[1], 256) ||
+            ![fields[1] isEqualToString:[NSString stringWithUTF8String:attempt_->networkVersion.cStr()]] ||
+            ![fields[2] isKindOfClass:[NSNumber class]] || ![fields[3] isKindOfClass:[NSNumber class]] ||
+            ![fields[4] isKindOfClass:[NSArray class]] || ![roster_ isEqualToArray:fields[4]] ||
+            ![fields[5] isKindOfClass:[NSString class]])
+            return false;
+        const double role = [fields[2] doubleValue];
+        const double capacity = [fields[3] doubleValue];
+        if ((role != 0 && role != 1) || (role == 0 && capacity != 0) ||
+            (role == 1 && !(capacity >= 2 && capacity <= 32 && std::floor(capacity) == capacity)))
+            return false;
+        const Intent intent(role == 1, static_cast<unsigned int>(capacity));
+        const auto identity = key(sender);
+        auto existing = intents_.find(identity);
+        if (existing != intents_.end() && (existing->second.creator != intent.creator || existing->second.capacity != intent.capacity))
+            return false;
+        intents_.emplace(identity, intent);
+        NSString* host = fields[5];
+        if (host.length)
+        {
+            if (![roster_ containsObject:host])
+                return false;
+            const auto proposed = key(host);
+            auto previous = acknowledgements_.find(identity);
+            if (previous != acknowledgements_.end() && previous->second != proposed)
+                return false;
+            acknowledgements_.emplace(identity, proposed);
+        }
+        return true;
+    }
+
+    void reject(const char* reason)
+    {
+        LOG_WARNING << "GameKit match rejected: " << reason;
+        cancel();
+        failureReason_ = MultiplayerOperationFailureReason::LobbyEntryFailed;
+    }
+
+    const GameKitAuthentication& authentication_;
+    uint64_t generation_ = 0;
+    std::shared_ptr<GameKitMatchmakingAttempt> attempt_;
+    std::shared_ptr<GameKitMatchMailbox> mailbox_;
+    CarbonGameKitMatchDelegate* delegate_ = nil;
+    NSArray<NSString*>* roster_ = nil;
+    NSString* localIdentity_ = nil;
+    NSString* hostIdentity_ = nil;
+    std::map<std::string, Intent> intents_;
+    std::map<std::string, std::string> acknowledgements_;
+    Clock::time_point started_ = Clock::now();
+    Clock::time_point nextSend_ = Clock::now();
+    bool ready_ = false;
+    bool sentAcknowledgement_ = false;
+    MultiplayerOperation operation_ = MultiplayerOperation::FindLobby;
+    MultiplayerOperationFailureReason failureReason_ = MultiplayerOperationFailureReason::None;
+};
+
 class GameKitMultiplayer : public MultiplayerInterface
 {
 public:
     explicit GameKitMultiplayer(const GameKitAuthentication& authentication)
-        : authentication_(authentication), matchmaking_(authentication) {}
+        : authentication_(authentication), matchmaking_(authentication), negotiation_(authentication) {}
     String getLocalPlayerName() const override { return authentication_.getPlayerName(); }
 
-    void update() { matchmaking_.update(); }
+    void update()
+    {
+        matchmaking_.update();
+        auto attempt = matchmaking_.takeCompleted();
+        if (attempt && !negotiation_.begin(attempt))
+            [attempt->match disconnect];
+        negotiation_.update();
+    }
 
     // Public matchmaking remains unavailable until the negotiation and transport
     // stages can establish a valid Carbon session and dispatch completion events.
 private:
     const GameKitAuthentication& authentication_;
     GameKitMatchmaking matchmaking_;
+    GameKitNegotiation negotiation_;
 };
 
 class GameKitConnectionPlatform : public ConnectionPlatformInterface
