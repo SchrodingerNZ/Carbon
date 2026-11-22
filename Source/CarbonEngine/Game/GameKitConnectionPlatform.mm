@@ -614,6 +614,27 @@ struct GameKitSessionCandidate
     }
 };
 
+// Own the native transport and its existing callback mailbox continuously across
+// the negotiation/session boundary. No delegate replacement is needed.
+struct GameKitActiveMatch
+{
+    std::shared_ptr<GameKitMatchmakingAttempt> attempt;
+    std::shared_ptr<GameKitMatchMailbox> mailbox;
+    std::shared_ptr<GameKitSessionCandidate> candidate;
+    CarbonGameKitMatchDelegate* delegate = nil;
+    uint64_t accountGeneration = 0;
+
+    ~GameKitActiveMatch()
+    {
+        mailbox.reset();
+        if (attempt)
+        {
+            attempt->match.delegate = nil;
+            [attempt->match disconnect];
+        }
+    }
+};
+
 // A fixed native roster must agree on the full protocol version, exactly one
 // creator, and the same host identity before it can become a Carbon session.
 // Hello and acknowledgement packets carry the same immutable participant intent.
@@ -685,6 +706,7 @@ public:
         candidate_.reset();
         ready_ = false;
         sentAcknowledgement_ = false;
+        failureReason_ = MultiplayerOperationFailureReason::None;
     }
 
     bool isPending() const { return bool(attempt_) && !ready_; }
@@ -694,6 +716,21 @@ public:
     NSString* getHostIdentity() const { return hostIdentity_; }
     NSArray<NSString*>* getRoster() const { return roster_; }
     std::shared_ptr<GameKitSessionCandidate> getCandidate() const { return ready_ ? candidate_ : nullptr; }
+
+    std::shared_ptr<GameKitActiveMatch> takeReady()
+    {
+        if (!ready_ || !candidate_ || !attempt_ || !mailbox_ || mailbox_->failed)
+            return nullptr;
+        auto active = std::make_shared<GameKitActiveMatch>();
+        active->attempt.swap(attempt_);
+        active->mailbox.swap(mailbox_);
+        active->candidate.swap(candidate_);
+        active->delegate = delegate_;
+        active->accountGeneration = generation_;
+        // Clear negotiation state without disconnecting the transferred match.
+        cancel();
+        return active;
+    }
 
     void update()
     {
@@ -987,23 +1024,177 @@ class GameKitMultiplayer : public MultiplayerInterface
 public:
     explicit GameKitMultiplayer(const GameKitAuthentication& authentication)
         : authentication_(authentication), matchmaking_(authentication), negotiation_(authentication) {}
+
+    bool isAvailable() const override { return authentication_.isAuthenticated(); }
     String getLocalPlayerName() const override { return authentication_.getPlayerName(); }
+    bool isInLobby() const override { return bool(active_); }
+    bool isLobbyPending() const override { return pending_; }
+    bool isSearching() const override { return pending_ && operation_ == MultiplayerOperation::FindLobby; }
+
+    // GameKit has no externally joinable platform lobby identifier. The Carbon
+    // session ID remains available through getSession(). Explicit join is inherited.
+    bool findLobby(const String& version) override
+    {
+        if (![NSThread isMainThread])
+            return false;
+        const auto maximum = [GKMatchRequest maxPlayersAllowedForMatchOfType:GKMatchTypePeerToPeer];
+        return begin(MultiplayerOperation::FindLobby, version, maximum > 32 ? 32u : static_cast<unsigned int>(maximum));
+    }
+
+    bool createLobby(const String& version, unsigned int maxMembers) override
+    {
+        return begin(MultiplayerOperation::CreateLobby, version, maxMembers);
+    }
+
+    void leaveLobby() override { endSession(MultiplayerSessionEndReason::Left); }
+
+    unsigned int getConnectedPlayerCount() const override
+    {
+        unsigned int count = 0;
+        for (unsigned int i = 0; active_ && i < getSession().getPlayerCount(); ++i)
+        {
+            const auto player = getSession().getPlayer(i);
+            if (player && player->getID() != getSession().getLocalPlayerID() &&
+                player->getConnectionState() == MultiplayerConnectionState::Connected)
+                ++count;
+        }
+        return count;
+    }
+
+    PlayerID getConnectedPlayer(unsigned int index) const override
+    {
+        for (unsigned int i = 0; active_ && i < getSession().getPlayerCount(); ++i)
+        {
+            const auto player = getSession().getPlayer(i);
+            if (player && player->getID() != getSession().getLocalPlayerID() &&
+                player->getConnectionState() == MultiplayerConnectionState::Connected && index-- == 0)
+                return player->getID();
+        }
+        return PlayerID();
+    }
 
     void update()
     {
+        if (active_)
+        {
+            if (!authentication_.isAuthenticated() || active_->accountGeneration != authentication_.getGeneration() ||
+                active_->mailbox->failed)
+                endSession(MultiplayerSessionEndReason::Left);
+            // The next integration stage consumes the retained transport mailbox.
+            return;
+        }
+        if (!pending_)
+            return;
+        if (!authentication_.isAuthenticated() || accountGeneration_ != authentication_.getGeneration())
+        {
+            fail(MultiplayerOperationFailureReason::ServiceFailure);
+            return;
+        }
         matchmaking_.update();
         auto attempt = matchmaking_.takeCompleted();
-        if (attempt && !negotiation_.begin(attempt))
-            [attempt->match disconnect];
+        if (attempt)
+        {
+            if (attempt->failed)
+            {
+                fail(MultiplayerOperationFailureReason::ServiceFailure);
+                return;
+            }
+            if (!negotiation_.begin(attempt))
+            {
+                [attempt->match disconnect];
+                fail(MultiplayerOperationFailureReason::LobbyEntryFailed);
+                return;
+            }
+        }
         negotiation_.update();
+        if (negotiation_.getFailureReason() != MultiplayerOperationFailureReason::None && !matchmaking_.isPending())
+        {
+            fail(negotiation_.getFailureReason());
+            return;
+        }
+        auto ready = negotiation_.takeReady();
+        if (ready)
+            adopt(ready);
     }
 
-    // Public matchmaking remains unavailable until the negotiation and transport
-    // stages can establish a valid Carbon session and dispatch completion events.
 private:
+    bool begin(MultiplayerOperation operation, const String& version, unsigned int maxMembers)
+    {
+        if (active_ || pending_ || !matchmaking_.begin(operation, version, 2, maxMembers))
+            return false;
+        ++generation_;
+        pending_ = true;
+        operation_ = operation;
+        accountGeneration_ = authentication_.getGeneration();
+        return true;
+    }
+
+    void fail(MultiplayerOperationFailureReason reason)
+    {
+        const auto operation = operation_;
+        ++generation_;
+        pending_ = false;
+        matchmaking_.cancel();
+        negotiation_.cancel();
+        dispatchOperationCompleted(operation, reason);
+    }
+
+    void adopt(const std::shared_ptr<GameKitActiveMatch>& ready)
+    {
+        const auto operation = operation_;
+        const auto previous = getSession().getState();
+        const auto generation = ++generation_;
+        active_ = ready;
+        pending_ = false;
+        mutableSession() = active_->candidate->session;
+        // Every public query is coherent before the first callback. A callback
+        // may leave or replace this session; do not resume dispatch for it.
+        dispatchSessionStateChanged(previous);
+        if (generation != generation_ || active_ != ready)
+            return;
+        dispatchSessionUpdated();
+        if (generation == generation_ && active_ == ready)
+            dispatchOperationCompleted(operation, true);
+    }
+
+    void endSession(MultiplayerSessionEndReason reason)
+    {
+        const auto generation = ++generation_;
+        pending_ = false;
+        matchmaking_.cancel();
+        negotiation_.cancel();
+        if (!active_)
+            return;
+        auto old = active_;
+        active_.reset();
+        auto& controller = old->candidate->controller;
+        controller.invalidateGeneration();
+        controller.discardMetadata();
+        controller.clearParticipants();
+        const auto ended = controller.finishSession(mutableSession());
+        // Disconnect before dispatching callbacks, even if adopt() still holds
+        // a shared reference to the old transport during reentrant cancellation.
+        old->mailbox.reset();
+        old->attempt->match.delegate = nil;
+        [old->attempt->match disconnect];
+        old->attempt.reset();
+        if (ended.previousID && ended.previousState != MultiplayerSessionState::Ended)
+            dispatchSessionEnded(ended.previousID, reason);
+        if (generation != generation_)
+            return;
+        dispatchSessionStateChanged(ended.previousState);
+        if (generation == generation_ && ended.hadPlayers)
+            dispatchSessionUpdated();
+    }
+
     const GameKitAuthentication& authentication_;
     GameKitMatchmaking matchmaking_;
     GameKitNegotiation negotiation_;
+    std::shared_ptr<GameKitActiveMatch> active_;
+    bool pending_ = false;
+    MultiplayerOperation operation_ = MultiplayerOperation::FindLobby;
+    uint64_t generation_ = 0;
+    uint64_t accountGeneration_ = 0;
 };
 
 class GameKitConnectionPlatform : public ConnectionPlatformInterface
