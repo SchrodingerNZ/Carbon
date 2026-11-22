@@ -1502,16 +1502,29 @@ public:
             return;
 
         // Snapshot connection handles because callbacks can leave the lobby during dispatch.
+        const auto generation = sessionController_.generation();
+        const auto receivedLobbyID = lobbyID_;
         const auto connections = peers_;
         for (const auto& peer : connections)
         {
+            if (generation != sessionController_.generation() || lobbyID_ != receivedLobbyID)
+                break;
+
             if (!peer.second.connected)
                 continue;
 
+            const auto connectionIsCurrent = [&]()
+            {
+                if (generation != sessionController_.generation() || lobbyID_ != receivedLobbyID)
+                    return false;
+
+                const auto live = peers_.find(peer.first);
+                return live != peers_.end() && live->second.connected && live->second.handle == peer.second.handle;
+            };
+
             for (unsigned int batch = 0; batch < 32; ++batch)
             {
-                const auto live = peers_.find(peer.first);
-                if (!lobbyID_ || live == peers_.end() || live->second.handle != peer.second.handle)
+                if (!connectionIsCurrent())
                     break;
 
                 void* messages[16] = {};
@@ -1521,6 +1534,14 @@ public:
 
                 for (int index = 0; index < count; ++index)
                 {
+                    // A previous frame's application callback may have ended the session
+                    // or replaced this connection. Release the remaining messages without dispatch.
+                    if (!connectionIsCurrent())
+                    {
+                        releaseMessage_(messages[index]);
+                        continue;
+                    }
+
                     // SteamNetworkingMessage_t begins with payload pointer and 32-bit size.
                     void* payload = nullptr;
                     int32_t length = 0;
