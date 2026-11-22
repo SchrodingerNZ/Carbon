@@ -561,6 +561,16 @@ struct GameKitMatchMailbox
     bool failed = false;
 };
 
+// Separate session traffic from JSON negotiation packets without interpreting
+// untrusted payloads until the negotiated session has been adopted.
+static const std::string gameKitSessionPrefix = "CGKS1|";
+
+static bool isGameKitSessionPacket(NSData* data)
+{
+    return data.length >= gameKitSessionPrefix.size() &&
+           memcmp(data.bytes, gameKitSessionPrefix.data(), gameKitSessionPrefix.size()) == 0;
+}
+
 // A private candidate uses the same registry and manifest machinery as Steam.
 // It is not the application's public session until the transport is ready.
 struct GameKitSessionCandidate
@@ -704,6 +714,7 @@ public:
         intents_.clear();
         acknowledgements_.clear();
         candidate_.reset();
+        earlySessionPackets_.clear();
         ready_ = false;
         sentAcknowledgement_ = false;
         failureReason_ = MultiplayerOperationFailureReason::None;
@@ -727,6 +738,10 @@ public:
         active->candidate.swap(candidate_);
         active->delegate = delegate_;
         active->accountGeneration = generation_;
+        // Older buffered packets must precede packets queued since the last update.
+        earlySessionPackets_.insert(earlySessionPackets_.end(), active->mailbox->packets.begin(),
+                                    active->mailbox->packets.end());
+        active->mailbox->packets.swap(earlySessionPackets_);
         // Clear negotiation state without disconnecting the transferred match.
         cancel();
         return active;
@@ -784,11 +799,22 @@ public:
         std::vector<GameKitMatchPacket> packets;
         packets.swap(mailbox_->packets);
         for (const auto& packet : packets)
-            if (!receive(packet))
+        {
+            if (isGameKitSessionPacket(packet.data))
+            {
+                if (earlySessionPackets_.size() >= 256)
+                {
+                    reject("early session mailbox overflow");
+                    return;
+                }
+                earlySessionPackets_.push_back(packet);
+            }
+            else if (!receive(packet))
             {
                 reject("invalid or incompatible negotiation packet");
                 return;
             }
+        }
 
         if (intents_.size() == roster_.count && !hostIdentity_)
         {
@@ -1011,6 +1037,7 @@ private:
     std::map<std::string, Intent> intents_;
     std::map<std::string, std::pair<std::string, std::string>> acknowledgements_;
     std::shared_ptr<GameKitSessionCandidate> candidate_;
+    std::vector<GameKitMatchPacket> earlySessionPackets_;
     Clock::time_point started_ = Clock::now();
     Clock::time_point nextSend_ = Clock::now();
     bool ready_ = false;
@@ -1048,6 +1075,91 @@ public:
 
     void leaveLobby() override { endSession(MultiplayerSessionEndReason::Left); }
 
+    bool setSessionMetadata(const String& key, const String& value) override
+    {
+        if (!canEditMetadata() || !Codec::validMetadataKey(key) || value.length() > 256)
+            return false;
+        auto& controller = active_->candidate->controller;
+        auto metadata = controller.metadataDirty() ? controller.stagedMetadata() : getSession().getMetadata();
+        metadata[key] = value;
+        if (!Codec::validMetadata(metadata))
+            return false;
+        controller.stageMetadata(metadata);
+        return true;
+    }
+
+    bool removeSessionMetadata(const String& key) override
+    {
+        if (!canEditMetadata() || !Codec::validMetadataKey(key))
+            return false;
+        auto& controller = active_->candidate->controller;
+        auto metadata = controller.metadataDirty() ? controller.stagedMetadata() : getSession().getMetadata();
+        if (!metadata.erase(key))
+            return false;
+        controller.stageMetadata(metadata);
+        return true;
+    }
+
+    bool publishMetadata() override
+    {
+        if (!canEditMetadata())
+            return false;
+        auto& controller = active_->candidate->controller;
+        if (!controller.metadataDirty())
+            return true;
+        const auto metadata = controller.stagedMetadata();
+        const auto manifest = buildManifest(metadata);
+        auto& agreement = controller.agreement();
+        if (manifest != agreement.manifest())
+        {
+            const auto revision = agreement.revision() + 1;
+            if (!revision || !sendControl(snapshot('L', revision, manifest)))
+                return false;
+            agreement.publish(revision, manifest, localMember());
+        }
+        controller.discardMetadata();
+        if (getSession().getMetadata() != metadata)
+        {
+            mutableSession().setMetadata(metadata);
+            dispatchSessionUpdated();
+        }
+        return true;
+    }
+
+    bool startGame() override
+    {
+        if (!canEditMetadata() || !nativeRosterIntact())
+            return false;
+        auto& controller = active_->candidate->controller;
+        auto& agreement = controller.agreement();
+        if (controller.metadataDirty() || !agreement.revision() ||
+            agreement.manifest() != buildManifest(getSession().getMetadata()))
+            return false;
+        if (!sendControl(snapshot('S', agreement.revision(), agreement.manifest())))
+            return false;
+        enterSyncing();
+        return true;
+    }
+
+    bool setReady(bool ready) override
+    {
+        if (!sessionUsable() || getSession().getState() != MultiplayerSessionState::Syncing)
+            return false;
+        auto& controller = active_->candidate->controller;
+        auto& agreement = controller.agreement();
+        if (isHost())
+        {
+            agreement.setMemberReady(localMember(), ready);
+            beginPlayingIfReady();
+        }
+        else
+        {
+            agreement.requestLocalReadiness(ready);
+            sendGuestAgreement();
+        }
+        return true;
+    }
+
     unsigned int getConnectedPlayerCount() const override
     {
         unsigned int count = 0;
@@ -1079,8 +1191,11 @@ public:
         {
             if (!authentication_.isAuthenticated() || active_->accountGeneration != authentication_.getGeneration() ||
                 active_->mailbox->failed)
+            {
                 endSession(MultiplayerSessionEndReason::Left);
-            // The next integration stage consumes the retained transport mailbox.
+                return;
+            }
+            updateSession();
             return;
         }
         if (!pending_)
@@ -1118,6 +1233,253 @@ public:
     }
 
 private:
+    using Controller = SessionDetail::SessionController<std::string>;
+    using Codec = SessionDetail::SessionManifestCodec;
+
+    bool sessionUsable() const
+    {
+        return active_ && active_->mailbox && !active_->mailbox->failed && authentication_.isAuthenticated() &&
+               active_->accountGeneration == authentication_.getGeneration();
+    }
+
+    bool isHost() const { return getSession().getHostPlayerID() == getSession().getLocalPlayerID(); }
+
+    std::string localMember() const
+    {
+        return active_->candidate->controller.registry().destinations().at(getSession().getLocalPlayerID().getValue());
+    }
+
+    bool canEditMetadata() const
+    {
+        return sessionUsable() && isHost() && getSession().getState() == MultiplayerSessionState::Lobby;
+    }
+
+    std::string memberName(const std::string& member) const
+    {
+        const auto& assignments = active_->candidate->controller.registry().assignments();
+        const auto found = assignments.find(member);
+        if (found == assignments.end())
+            return {};
+        const auto player = getSession().getPlayer(PlayerID(found->second));
+        return player ? std::string(player->getName().cStr(), player->getName().length()) : std::string();
+    }
+
+    std::string buildManifest(const MultiplayerSessionMetadata& metadata) const
+    {
+        return Codec::appendSessionMetadata(Codec::buildRoster(active_->candidate->controller.registry().destinations(),
+            [](const std::string& member) { return Codec::encodeManifestName(member); },
+            [this](const std::string& member) { return memberName(member); }), metadata);
+    }
+
+    bool nativeRosterIntact() const
+    {
+        if (!sessionUsable() || active_->attempt->match.expectedPlayerCount != 0)
+            return false;
+        const auto& members = active_->candidate->controller.registry().assignments();
+        std::set<std::string> connected;
+        connected.insert(localMember());
+        for (GKPlayer* player in active_->attempt->match.players)
+        {
+            NSString* identity = gameKitMemberIdentity(player);
+            if (!identity.UTF8String || !members.count(identity.UTF8String) || !connected.insert(identity.UTF8String).second)
+                return false;
+        }
+        return connected.size() == members.size();
+    }
+
+    static std::string snapshot(char phase, uint64_t revision, const std::string& manifest)
+    {
+        return std::string(1, phase) + "|" + std::to_string(revision) + "|" + manifest;
+    }
+
+    std::string sessionPrefix() const { return gameKitSessionPrefix + std::to_string(getSession().getID()) + "|"; }
+
+    bool sendControl(const std::string& message)
+    {
+        if (!sessionUsable())
+            return false;
+        const auto bytes = sessionPrefix() + message;
+        if (bytes.size() > 32768)
+            return false;
+        auto data = [NSData dataWithBytes:bytes.data() length:bytes.size()];
+        NSError* error = nil;
+        if ([active_->attempt->match sendDataToAllPlayers:data withDataMode:GKMatchSendDataReliable error:&error])
+            return true;
+        // A failed broadcast may have reached a subset. Do not continue with
+        // divergent authoritative state; terminate on the next update.
+        active_->mailbox->failed = true;
+        LOG_WARNING << "GameKit session control submission failed";
+        return false;
+    }
+
+    void enterSyncing()
+    {
+        auto& controller = active_->candidate->controller;
+        auto& frozen = controller.frozenMembers();
+        frozen.clear();
+        for (const auto& member : controller.registry().destinations())
+            frozen.push_back(member.second);
+        controller.beginSynchronization(localMember());
+        const auto previous = getSession().getState();
+        mutableSession().setIdentity(getSession().getID(), controller.state(), getSession().getHostPlayerID(),
+                                     getSession().getLocalPlayerID());
+        dispatchSessionStateChanged(previous);
+        // Callers must revalidate active_ after this callback.
+    }
+
+    void beginPlayingIfReady()
+    {
+        if (!sessionUsable() || !isHost())
+            return;
+        auto& controller = active_->candidate->controller;
+        if (!controller.canBeginPlaying(true) || !nativeRosterIntact())
+            return;
+        auto& agreement = controller.agreement();
+        if (!sendControl(snapshot('P', agreement.revision(), agreement.manifest())))
+            return;
+        const auto previous = controller.enterPlaying(mutableSession(), getSession().getID());
+        dispatchSessionStateChanged(previous);
+    }
+
+    void sendGuestAgreement()
+    {
+        if (!sessionUsable() || isHost())
+            return;
+        auto& controller = active_->candidate->controller;
+        auto& agreement = controller.agreement();
+        const auto phase = controller.state();
+        if (phase != MultiplayerSessionState::Lobby && phase != MultiplayerSessionState::Syncing)
+            return;
+        const auto revision = agreement.revision();
+        if (!agreement.hasLocalConfirmation(revision, phase))
+        {
+            if (!sendControl(controller.confirmationMessage(revision, agreement.manifest())))
+                return;
+            agreement.markLocalConfirmation(revision, phase);
+        }
+        if (agreement.hasPendingReadiness() && sendControl(controller.readinessMessage(revision)))
+            agreement.markLocalReadinessSent(revision);
+    }
+
+    bool acceptSnapshot(const std::string& message)
+    {
+        auto& controller = active_->candidate->controller;
+        auto& agreement = controller.agreement();
+        const auto phase = message[0];
+        uint64_t revision = 0;
+        std::string manifest;
+        if (!Codec::decodeSnapshot(message.substr(2), revision, manifest))
+            return false;
+        if (revision < agreement.revision())
+            return true; // old reliable publication, never roll back
+        MultiplayerSessionMetadata metadata;
+        std::string reconstructed;
+        if (controller.validateManifest(getSession(), manifest,
+            [](const std::string& member) { return Codec::encodeManifestName(member); },
+            [this](const std::string& member) { return memberName(member); }, metadata, reconstructed) !=
+            Controller::ManifestValidation::Valid)
+            return false;
+        if (revision == agreement.revision() && manifest != agreement.manifest())
+            return false;
+        const auto state = controller.state();
+        if (phase == 'L')
+        {
+            if (state != MultiplayerSessionState::Lobby)
+                return revision == agreement.revision();
+            if (revision > agreement.revision())
+                agreement.publish(revision, manifest, localMember());
+            if (metadata != getSession().getMetadata())
+            {
+                mutableSession().setMetadata(metadata);
+                dispatchSessionUpdated();
+            }
+            return true;
+        }
+        if (revision != agreement.revision() || manifest != agreement.manifest())
+            return false; // the locked snapshot must already have been published
+        if (phase == 'S')
+        {
+            if (state == MultiplayerSessionState::Lobby)
+                enterSyncing();
+            return true;
+        }
+        if (state == MultiplayerSessionState::Playing)
+            return true;
+        if (state != MultiplayerSessionState::Syncing || !agreement.hasLocalConfirmation(revision, state) ||
+            agreement.requestedReadiness() != 1 || agreement.hasPendingReadiness())
+            return false;
+        const auto previous = controller.enterPlaying(mutableSession(), getSession().getID());
+        dispatchSessionStateChanged(previous);
+        return true;
+    }
+
+    bool receiveControl(const GameKitMatchPacket& packet)
+    {
+        // Negotiation retransmissions may still be queued after adoption.
+        if (!isGameKitSessionPacket(packet.data))
+            return true;
+        const std::string bytes(static_cast<const char*>(packet.data.bytes), packet.data.length);
+        const auto prefix = sessionPrefix();
+        if (bytes.compare(0, prefix.size(), prefix) != 0)
+            return false;
+        const auto message = bytes.substr(prefix.size());
+        NSString* identity = gameKitMemberIdentity(packet.sender);
+        if (!identity.UTF8String || message.empty())
+            return false;
+        const std::string sender(identity.UTF8String);
+        auto& controller = active_->candidate->controller;
+        const auto& assignments = controller.registry().assignments();
+        const auto found = assignments.find(sender);
+        if (found == assignments.end() || sender == localMember())
+            return false;
+        if (message.size() >= 2 && message[1] == '|' &&
+            (message[0] == 'L' || message[0] == 'S' || message[0] == 'P'))
+        {
+            if (isHost() || PlayerID(found->second) != getSession().getHostPlayerID())
+                return false;
+            return acceptSnapshot(message);
+        }
+        // Guest confirmations and readiness are broadcast, but only the host
+        // consumes them. Reliable per-sender ordering preserves their sequence.
+        if (!isHost())
+            return true;
+        std::string value;
+        if (controller.acceptReadinessMessage(sender, true, message, value))
+            return true;
+        uint64_t revision = 0;
+        return controller.acceptConfirmationMessage(sender, true, message, revision) != Controller::ConfirmationResult::Invalid;
+    }
+
+    void updateSession()
+    {
+        const auto active = active_;
+        const auto generation = generation_;
+        if (!nativeRosterIntact())
+        {
+            endSession(MultiplayerSessionEndReason::Left);
+            return;
+        }
+        std::vector<GameKitMatchPacket> packets;
+        packets.swap(active->mailbox->packets);
+        for (const auto& packet : packets)
+        {
+            if (generation != generation_ || active_ != active || !sessionUsable())
+                return;
+            if (!receiveControl(packet))
+            {
+                LOG_WARNING << "GameKit invalid session control packet";
+                endSession(MultiplayerSessionEndReason::Left);
+                return;
+            }
+        }
+        if (generation != generation_ || active_ != active || !sessionUsable())
+            return;
+        if (isHost())
+            beginPlayingIfReady();
+        else
+            sendGuestAgreement();
+    }
+
     bool begin(MultiplayerOperation operation, const String& version, unsigned int maxMembers)
     {
         if (active_ || pending_ || !matchmaking_.begin(operation, version, 2, maxMembers))
