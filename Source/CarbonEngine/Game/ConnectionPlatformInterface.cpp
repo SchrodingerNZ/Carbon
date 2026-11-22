@@ -412,6 +412,16 @@ private:
 class SteamMultiplayer : public MultiplayerInterface
 {
 public:
+    using GetRemoteStorageFunction = void* (CARBON_STEAM_CALL *)();
+    using CloudEnabledFunction = bool (CARBON_STEAM_CALL *)(void*);
+    using CloudFileWriteFunction = bool (CARBON_STEAM_CALL *)(void*, const char*, const void*, int32_t);
+    using CloudFileReadFunction = int32_t (CARBON_STEAM_CALL *)(void*, const char*, void*, int32_t);
+    using CloudFileExistsFunction = bool (CARBON_STEAM_CALL *)(void*, const char*);
+    using CloudFileSizeFunction = int32_t (CARBON_STEAM_CALL *)(void*, const char*);
+    using CloudFileTimestampFunction = int64_t (CARBON_STEAM_CALL *)(void*, const char*);
+    using CloudFileCountFunction = int32_t (CARBON_STEAM_CALL *)(void*);
+    using CloudFileNameAndSizeFunction = const char* (CARBON_STEAM_CALL *)(void*, int, int32_t*);
+
     using GetMatchmakingFunction = void* (CARBON_STEAM_CALL *)();
     using AddFilterFunction = void (CARBON_STEAM_CALL *)(void*, const char*, const char*, int);
     using RequestListFunction = uint64_t (CARBON_STEAM_CALL *)(void*);
@@ -485,6 +495,9 @@ public:
 
     void initialize(const SharedLibrary& library)
     {
+        // Cloud storage is optional and does not participate in matchmaking availability.
+        initializeCloudStorage(library);
+
         // The same matchmaking interface owns discovery and lobby lifetime.
         auto getMatchmaking = library.mapFunction<GetMatchmakingFunction>("SteamAPI_SteamMatchmaking_v009");
         if (!getMatchmaking)
@@ -1916,6 +1929,50 @@ public:
     }
 
 private:
+    void initializeCloudStorage(const SharedLibrary& library)
+    {
+        auto getRemoteStorage = library.mapFunction<GetRemoteStorageFunction>("SteamAPI_SteamRemoteStorage_v016");
+
+        cloudEnabledForAccount_ = library.mapFunction<CloudEnabledFunction>("SteamAPI_ISteamRemoteStorage_IsCloudEnabledForAccount");
+        cloudEnabledForApp_ = library.mapFunction<CloudEnabledFunction>("SteamAPI_ISteamRemoteStorage_IsCloudEnabledForApp");
+        cloudFileWrite_ = library.mapFunction<CloudFileWriteFunction>("SteamAPI_ISteamRemoteStorage_FileWrite");
+        cloudFileRead_ = library.mapFunction<CloudFileReadFunction>("SteamAPI_ISteamRemoteStorage_FileRead");
+        cloudFileExists_ = library.mapFunction<CloudFileExistsFunction>("SteamAPI_ISteamRemoteStorage_FileExists");
+        cloudFileSize_ = library.mapFunction<CloudFileSizeFunction>("SteamAPI_ISteamRemoteStorage_GetFileSize");
+        cloudFileTimestamp_ = library.mapFunction<CloudFileTimestampFunction>("SteamAPI_ISteamRemoteStorage_GetFileTimestamp");
+        cloudFileCount_ = library.mapFunction<CloudFileCountFunction>("SteamAPI_ISteamRemoteStorage_GetFileCount");
+        cloudFileNameAndSize_ = library.mapFunction<CloudFileNameAndSizeFunction>("SteamAPI_ISteamRemoteStorage_GetFileNameAndSize");
+
+        remoteStorage_ = getRemoteStorage ? getRemoteStorage() : nullptr;
+        if (!cloudEnabledForAccount_ || !cloudEnabledForApp_ || !cloudFileWrite_ || !cloudFileRead_ ||
+            !cloudFileExists_ || !cloudFileSize_ || !cloudFileTimestamp_ || !cloudFileCount_ || !cloudFileNameAndSize_)
+            remoteStorage_ = nullptr;
+
+        if (!remoteStorage_)
+            LOG_INFO << "Steam cloud: Remote Storage interface unavailable";
+        else if (!isCloudStorageAvailable())
+            LOG_INFO << "Steam cloud: disabled for account or application";
+        else
+            LOG_INFO << "Steam cloud: Remote Storage available";
+    }
+
+    bool isCloudStorageAvailable() const
+    {
+        // Settings may change after initialization; check them at each operation.
+        return remoteStorage_ && cloudEnabledForAccount_(remoteStorage_) && cloudEnabledForApp_(remoteStorage_);
+    }
+
+    void* remoteStorage_ = nullptr;
+    CloudEnabledFunction cloudEnabledForAccount_ = nullptr;
+    CloudEnabledFunction cloudEnabledForApp_ = nullptr;
+    CloudFileWriteFunction cloudFileWrite_ = nullptr;
+    CloudFileReadFunction cloudFileRead_ = nullptr;
+    CloudFileExistsFunction cloudFileExists_ = nullptr;
+    CloudFileSizeFunction cloudFileSize_ = nullptr;
+    CloudFileTimestampFunction cloudFileTimestamp_ = nullptr;
+    CloudFileCountFunction cloudFileCount_ = nullptr;
+    CloudFileNameAndSizeFunction cloudFileNameAndSize_ = nullptr;
+
     enum class Role { None, Host, Guest };
 
     std::string getSteamPlayerName(uint64_t steamID) const
