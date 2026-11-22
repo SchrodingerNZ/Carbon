@@ -765,9 +765,7 @@ public:
         if (sessionController_.agreement().hasLocalConfirmation(revision, sessionController_.state()))
             return;
 
-        const auto phase = sessionController_.state() == MultiplayerSessionState::Syncing ? "S" : "L";
-        const auto message = std::string("CARBON_MANIFEST_CONFIRM|") + phase + "|" +
-                             std::to_string(revision) + "|" + localManifest;
+        const auto message = sessionController_.confirmationMessage(revision, localManifest);
         if (sendLobbyChat_ && sendLobbyChat_(matchmaking_, lobbyID_, message.data(), int(message.size())))
         {
             sessionController_.agreement().markLocalConfirmation(revision, sessionController_.state());
@@ -778,11 +776,7 @@ public:
     // Only the host can finish synchronization; confirmation and readiness are independent.
     void beginPlayingIfReady()
     {
-        if (sessionController_.state() != MultiplayerSessionState::Syncing || !lobbyID_ ||
-            getLobbyOwner_(matchmaking_, lobbyID_) != localSteamID_ || sessionController_.frozenMembers().empty())
-            return;
-
-        if (!sessionController_.agreement().allMembersReady(sessionController_.frozenMembers()))
+        if (!lobbyID_ || !sessionController_.canBeginPlaying(getLobbyOwner_(matchmaking_, lobbyID_) == localSteamID_))
             return;
 
         // Publish the phase and frozen roster together. Never expose Playing
@@ -830,8 +824,7 @@ public:
         if (!readManifestSnapshot(revision, manifest) || revision != sessionController_.agreement().confirmedRevision())
             return;
 
-        const auto message = std::string("CARBON_PLAYER_READY|") + std::to_string(revision) +
-                             "|" + (sessionController_.agreement().requestedReadiness() ? "1" : "0");
+        const auto message = sessionController_.readinessMessage(revision);
         if (sendLobbyChat_ && sendLobbyChat_(matchmaking_, lobbyID_, message.data(), int(message.size())))
         {
             sessionController_.agreement().markLocalReadinessSent(revision);
@@ -893,26 +886,10 @@ public:
         const std::string readyPrefix = "CARBON_PLAYER_READY|";
         if (message.compare(0, readyPrefix.size(), readyPrefix) == 0)
         {
-            if (sessionController_.state() != MultiplayerSessionState::Syncing ||
-                getLobbyOwner_(matchmaking_, lobbyID_) != localSteamID_ ||
-                std::find(sessionController_.frozenMembers().begin(), sessionController_.frozenMembers().end(), sender) == sessionController_.frozenMembers().end())
+            std::string value;
+            if (!sessionController_.acceptReadinessMessage(
+                    sender, getLobbyOwner_(matchmaking_, lobbyID_) == localSteamID_, message, value))
                 return;
-
-            const auto separator = message.find('|', readyPrefix.size());
-            if (separator == std::string::npos)
-                return;
-
-            const auto number = message.substr(readyPrefix.size(), separator - readyPrefix.size());
-            char* end = nullptr;
-            const auto revision = std::strtoull(number.c_str(), &end, 10);
-            if (!revision || !end || *end || revision != sessionController_.agreement().revision())
-                return;
-
-            const auto value = message.substr(separator + 1);
-            if (value != "1" && value != "0")
-                return;
-
-            sessionController_.agreement().setMemberReady(sender, value == "1");
 
             LOG_INFO << "Steam multiplayer: PlayerReady " << value.c_str() << " from " << sender;
             beginPlayingIfReady();
@@ -928,41 +905,17 @@ public:
             return;
         }
 
-        const std::string prefix = "CARBON_MANIFEST_CONFIRM|";
-        if (message.compare(0, prefix.size(), prefix) != 0 ||
-            (sessionController_.state() != MultiplayerSessionState::Lobby && sessionController_.state() != MultiplayerSessionState::Syncing) ||
-            getLobbyOwner_(matchmaking_, lobbyID_) != localSteamID_)
-            return;
-
-        const auto phaseSeparator = message.find('|', prefix.size());
-        if (phaseSeparator == std::string::npos)
-            return;
-
-        const auto expectedPhase = sessionController_.state() == MultiplayerSessionState::Syncing ? "S" : "L";
-        if (message.substr(prefix.size(), phaseSeparator - prefix.size()) != expectedPhase)
-            return;
-
-        const auto separator = message.find('|', phaseSeparator + 1);
-        if (separator == std::string::npos)
-            return;
-
-        const auto number = message.substr(phaseSeparator + 1, separator - phaseSeparator - 1);
-        char* end = nullptr;
-        const auto revision = std::strtoull(number.c_str(), &end, 10);
-        if (!revision || !end || *end || revision != sessionController_.agreement().revision())
-            return;
-
-        // Only members of the host's committed roster may confirm it.
-        if (message.substr(separator + 1) != sessionController_.agreement().manifest() ||
-            sessionController_.registry().assignments().find(sender) == sessionController_.registry().assignments().end() ||
-            (sessionController_.state() == MultiplayerSessionState::Syncing &&
-             std::find(sessionController_.frozenMembers().begin(), sessionController_.frozenMembers().end(), sender) == sessionController_.frozenMembers().end()))
+        using Confirmation = SessionDetail::SessionController<uint64_t>::ConfirmationResult;
+        uint64_t revision = 0;
+        const auto result = sessionController_.acceptConfirmationMessage(
+            sender, getLobbyOwner_(matchmaking_, lobbyID_) == localSteamID_, message, revision);
+        if (result == Confirmation::Invalid)
         {
             LOG_WARNING_WITHOUT_CALLER << "Steam multiplayer: invalid ManifestConfirm from member " << sender;
             return;
         }
 
-        if (sessionController_.agreement().confirmMember(sender))
+        if (result == Confirmation::Accepted)
         {
             LOG_INFO << "Steam multiplayer: ManifestConfirm accepted from " << sender
                      << " for revision " << revision;

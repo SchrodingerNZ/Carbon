@@ -7,7 +7,9 @@
 #include "CarbonEngine/Common.h"
 #include "CarbonEngine/Game/MultiplayerSession.h"
 #include "CarbonEngine/Game/SessionManifestCodec.hpp"
+#include <algorithm>
 #include <cstddef>
+#include <cstdlib>
 #include <cstdint>
 #include <map>
 #include <set>
@@ -337,6 +339,97 @@ public:
         }
 
         return true;
+    }
+
+    // The provider must authenticate the sender and verify current membership before calling.
+    // Carbon owns the control-message grammar and revision/phase validation.
+    bool acceptReadinessMessage(const MemberID& sender, bool isHost, const std::string& message, std::string& value)
+    {
+        const std::string readyPrefix = "CARBON_PLAYER_READY|";
+        if (message.compare(0, readyPrefix.size(), readyPrefix) != 0)
+            return false;
+
+        if (state() != MultiplayerSessionState::Syncing ||
+            !isHost ||
+            std::find(frozenMembers_.begin(), frozenMembers_.end(), sender) == frozenMembers_.end())
+            return false;
+
+        const auto separator = message.find('|', readyPrefix.size());
+        if (separator == std::string::npos)
+            return false;
+
+        const auto number = message.substr(readyPrefix.size(), separator - readyPrefix.size());
+        char* end = nullptr;
+        const auto revision = std::strtoull(number.c_str(), &end, 10);
+        if (!revision || !end || *end || revision != agreement_.revision())
+            return false;
+
+        value = message.substr(separator + 1);
+        if (value != "1" && value != "0")
+            return false;
+
+        agreement_.setMemberReady(sender, value == "1");
+
+        return true;
+    }
+
+    enum class ConfirmationResult { Ignored, Invalid, Accepted };
+
+    ConfirmationResult acceptConfirmationMessage(const MemberID& sender, bool isHost, const std::string& message,
+                                                 uint64_t& revision)
+    {
+        const std::string prefix = "CARBON_MANIFEST_CONFIRM|";
+        if (message.compare(0, prefix.size(), prefix) != 0 ||
+            (state() != MultiplayerSessionState::Lobby && state() != MultiplayerSessionState::Syncing) ||
+            !isHost)
+            return ConfirmationResult::Ignored;
+
+        const auto phaseSeparator = message.find('|', prefix.size());
+        if (phaseSeparator == std::string::npos)
+            return ConfirmationResult::Ignored;
+
+        const auto expectedPhase = state() == MultiplayerSessionState::Syncing ? "S" : "L";
+        if (message.substr(prefix.size(), phaseSeparator - prefix.size()) != expectedPhase)
+            return ConfirmationResult::Ignored;
+
+        const auto separator = message.find('|', phaseSeparator + 1);
+        if (separator == std::string::npos)
+            return ConfirmationResult::Ignored;
+
+        const auto number = message.substr(phaseSeparator + 1, separator - phaseSeparator - 1);
+        char* end = nullptr;
+        revision = std::strtoull(number.c_str(), &end, 10);
+        if (!revision || !end || *end || revision != agreement_.revision())
+            return ConfirmationResult::Ignored;
+
+        // Only members of the host's committed roster may confirm it.
+        if (message.substr(separator + 1) != agreement_.manifest() ||
+            registry_.assignments().find(sender) == registry_.assignments().end() ||
+            (state() == MultiplayerSessionState::Syncing &&
+             std::find(frozenMembers_.begin(), frozenMembers_.end(), sender) == frozenMembers_.end()))
+        {
+            return ConfirmationResult::Invalid;
+        }
+
+        return agreement_.confirmMember(sender) ? ConfirmationResult::Accepted : ConfirmationResult::Ignored;
+    }
+
+    bool canBeginPlaying(bool isHost) const
+    {
+        return state() == MultiplayerSessionState::Syncing && isHost &&
+               agreement_.allMembersReady(frozenMembers_);
+    }
+
+    std::string confirmationMessage(uint64_t revision, const std::string& manifest) const
+    {
+        const auto phase = state() == MultiplayerSessionState::Syncing ? "S" : "L";
+        return std::string("CARBON_MANIFEST_CONFIRM|") + phase + "|" + std::to_string(revision) + "|" + manifest;
+    }
+
+    std::string readinessMessage(uint64_t revision) const
+    {
+        return std::string("CARBON_PLAYER_READY|") + std::to_string(revision) +
+               "|" + (agreement_.requestedReadiness() ? "1" : "0");
     }
 
     bool metadataDirty() const { return metadataDirty_; }
